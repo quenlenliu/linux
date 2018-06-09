@@ -25,21 +25,26 @@
 #define _INTEL_LRC_H_
 
 #include "intel_ringbuffer.h"
+#include "i915_gem_context.h"
 
-#define GEN8_LR_CONTEXT_ALIGN 4096
+#define GEN8_LR_CONTEXT_ALIGN I915_GTT_MIN_ALIGNMENT
 
 /* Execlists regs */
-#define RING_ELSP(ring)				_MMIO((ring)->mmio_base + 0x230)
-#define RING_EXECLIST_STATUS_LO(ring)		_MMIO((ring)->mmio_base + 0x234)
-#define RING_EXECLIST_STATUS_HI(ring)		_MMIO((ring)->mmio_base + 0x234 + 4)
-#define RING_CONTEXT_CONTROL(ring)		_MMIO((ring)->mmio_base + 0x244)
+#define RING_ELSP(engine)			_MMIO((engine)->mmio_base + 0x230)
+#define RING_EXECLIST_STATUS_LO(engine)		_MMIO((engine)->mmio_base + 0x234)
+#define RING_EXECLIST_STATUS_HI(engine)		_MMIO((engine)->mmio_base + 0x234 + 4)
+#define RING_CONTEXT_CONTROL(engine)		_MMIO((engine)->mmio_base + 0x244)
 #define	  CTX_CTRL_INHIBIT_SYN_CTX_SWITCH	(1 << 3)
 #define	  CTX_CTRL_ENGINE_CTX_RESTORE_INHIBIT	(1 << 0)
 #define   CTX_CTRL_RS_CTX_ENABLE                (1 << 1)
-#define RING_CONTEXT_STATUS_BUF_BASE(ring)	_MMIO((ring)->mmio_base + 0x370)
-#define RING_CONTEXT_STATUS_BUF_LO(ring, i)	_MMIO((ring)->mmio_base + 0x370 + (i) * 8)
-#define RING_CONTEXT_STATUS_BUF_HI(ring, i)	_MMIO((ring)->mmio_base + 0x370 + (i) * 8 + 4)
-#define RING_CONTEXT_STATUS_PTR(ring)		_MMIO((ring)->mmio_base + 0x3a0)
+#define	  CTX_CTRL_ENGINE_CTX_SAVE_INHIBIT	(1 << 2)
+#define RING_CONTEXT_STATUS_BUF_BASE(engine)	_MMIO((engine)->mmio_base + 0x370)
+#define RING_CONTEXT_STATUS_BUF_LO(engine, i)	_MMIO((engine)->mmio_base + 0x370 + (i) * 8)
+#define RING_CONTEXT_STATUS_BUF_HI(engine, i)	_MMIO((engine)->mmio_base + 0x370 + (i) * 8 + 4)
+#define RING_CONTEXT_STATUS_PTR(engine)		_MMIO((engine)->mmio_base + 0x3a0)
+#define RING_EXECLIST_SQ_CONTENTS(engine)	_MMIO((engine)->mmio_base + 0x510)
+#define RING_EXECLIST_CONTROL(engine)		_MMIO((engine)->mmio_base + 0x550)
+#define	  EL_CTRL_LOAD				(1 << 0)
 
 /* The docs specify that the write pointer wraps around after 5h, "After status
  * is written out to the last available status QW at offset 5h, this pointer
@@ -60,71 +65,50 @@
 enum {
 	INTEL_CONTEXT_SCHEDULE_IN = 0,
 	INTEL_CONTEXT_SCHEDULE_OUT,
+	INTEL_CONTEXT_SCHEDULE_PREEMPTED,
 };
 
 /* Logical Rings */
-int intel_logical_ring_alloc_request_extras(struct drm_i915_gem_request *request);
-int intel_logical_ring_reserve_space(struct drm_i915_gem_request *request);
-void intel_logical_ring_stop(struct intel_engine_cs *engine);
 void intel_logical_ring_cleanup(struct intel_engine_cs *engine);
-int intel_logical_rings_init(struct drm_device *dev);
-
-int logical_ring_flush_all_caches(struct drm_i915_gem_request *req);
-/**
- * intel_logical_ring_advance() - advance the ringbuffer tail
- * @ringbuf: Ringbuffer to advance.
- *
- * The tail is only updated in our logical ringbuffer struct.
- */
-static inline void intel_logical_ring_advance(struct intel_ringbuffer *ringbuf)
-{
-	ringbuf->tail &= ringbuf->size - 1;
-}
-/**
- * intel_logical_ring_emit() - write a DWORD to the ringbuffer.
- * @ringbuf: Ringbuffer to write to.
- * @data: DWORD to write.
- */
-static inline void intel_logical_ring_emit(struct intel_ringbuffer *ringbuf,
-					   u32 data)
-{
-	iowrite32(data, ringbuf->virtual_start + ringbuf->tail);
-	ringbuf->tail += 4;
-}
-static inline void intel_logical_ring_emit_reg(struct intel_ringbuffer *ringbuf,
-					       i915_reg_t reg)
-{
-	intel_logical_ring_emit(ringbuf, i915_mmio_reg_offset(reg));
-}
+int logical_render_ring_init(struct intel_engine_cs *engine);
+int logical_xcs_ring_init(struct intel_engine_cs *engine);
 
 /* Logical Ring Contexts */
 
-/* One extra page is added before LRC for GuC as shared data */
+/*
+ * We allocate a header at the start of the context image for our own
+ * use, therefore the actual location of the logical state is offset
+ * from the start of the VMA. The layout is
+ *
+ * | [guc]          | [hwsp] [logical state] |
+ * |<- our header ->|<- context image      ->|
+ *
+ */
+/* The first page is used for sharing data with the GuC */
 #define LRC_GUCSHR_PN	(0)
-#define LRC_PPHWSP_PN	(LRC_GUCSHR_PN + 1)
-#define LRC_STATE_PN	(LRC_PPHWSP_PN + 1)
+#define LRC_GUCSHR_SZ	(1)
+/* At the start of the context image is its per-process HWS page */
+#define LRC_PPHWSP_PN	(LRC_GUCSHR_PN + LRC_GUCSHR_SZ)
+#define LRC_PPHWSP_SZ	(1)
+/* Finally we have the logical state for the context */
+#define LRC_STATE_PN	(LRC_PPHWSP_PN + LRC_PPHWSP_SZ)
 
-struct i915_gem_context;
-
-uint32_t intel_lr_context_size(struct intel_engine_cs *engine);
-void intel_lr_context_unpin(struct i915_gem_context *ctx,
-			    struct intel_engine_cs *engine);
+/*
+ * Currently we include the PPHWSP in __intel_engine_context_size() so
+ * the size of the header is synonymous with the start of the PPHWSP.
+ */
+#define LRC_HEADER_PAGES LRC_PPHWSP_PN
 
 struct drm_i915_private;
+struct i915_gem_context;
 
-void intel_lr_context_reset(struct drm_i915_private *dev_priv,
-			    struct i915_gem_context *ctx);
-uint64_t intel_lr_context_descriptor(struct i915_gem_context *ctx,
-				     struct intel_engine_cs *engine);
+void intel_lr_context_resume(struct drm_i915_private *dev_priv);
 
-/* Execlists */
-int intel_sanitize_enable_execlists(struct drm_i915_private *dev_priv,
-				    int enable_execlists);
-struct i915_execbuffer_params;
-int intel_execlists_submission(struct i915_execbuffer_params *params,
-			       struct drm_i915_gem_execbuffer2 *args,
-			       struct list_head *vmas);
-
-void intel_execlists_cancel_requests(struct intel_engine_cs *engine);
+static inline uint64_t
+intel_lr_context_descriptor(struct i915_gem_context *ctx,
+			    struct intel_engine_cs *engine)
+{
+	return to_intel_context(ctx, engine)->lrc_desc;
+}
 
 #endif /* _INTEL_LRC_H_ */

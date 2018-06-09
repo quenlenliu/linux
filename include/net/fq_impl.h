@@ -12,23 +12,22 @@
 
 /* functions that are embedded into includer */
 
-static struct sk_buff *fq_flow_dequeue(struct fq *fq,
-				       struct fq_flow *flow)
+static void fq_adjust_removal(struct fq *fq,
+			      struct fq_flow *flow,
+			      struct sk_buff *skb)
 {
 	struct fq_tin *tin = flow->tin;
-	struct fq_flow *i;
-	struct sk_buff *skb;
-
-	lockdep_assert_held(&fq->lock);
-
-	skb = __skb_dequeue(&flow->queue);
-	if (!skb)
-		return NULL;
 
 	tin->backlog_bytes -= skb->len;
 	tin->backlog_packets--;
 	flow->backlog -= skb->len;
 	fq->backlog--;
+	fq->memory_usage -= skb->truesize;
+}
+
+static void fq_rejigger_backlog(struct fq *fq, struct fq_flow *flow)
+{
+	struct fq_flow *i;
 
 	if (flow->backlog == 0) {
 		list_del_init(&flow->backlogchain);
@@ -42,6 +41,21 @@ static struct sk_buff *fq_flow_dequeue(struct fq *fq,
 		list_move_tail(&flow->backlogchain,
 			       &i->backlogchain);
 	}
+}
+
+static struct sk_buff *fq_flow_dequeue(struct fq *fq,
+				       struct fq_flow *flow)
+{
+	struct sk_buff *skb;
+
+	lockdep_assert_held(&fq->lock);
+
+	skb = __skb_dequeue(&flow->queue);
+	if (!skb)
+		return NULL;
+
+	fq_adjust_removal(fq, flow, skb);
+	fq_rejigger_backlog(fq, flow);
 
 	return skb;
 }
@@ -145,6 +159,7 @@ static void fq_tin_enqueue(struct fq *fq,
 			   fq_flow_get_default_t get_default_func)
 {
 	struct fq_flow *flow;
+	bool oom;
 
 	lockdep_assert_held(&fq->lock);
 
@@ -154,6 +169,7 @@ static void fq_tin_enqueue(struct fq *fq,
 	flow->backlog += skb->len;
 	tin->backlog_bytes += skb->len;
 	tin->backlog_packets++;
+	fq->memory_usage += skb->truesize;
 	fq->backlog++;
 
 	fq_recalc_backlog(fq, tin, flow);
@@ -165,8 +181,8 @@ static void fq_tin_enqueue(struct fq *fq,
 	}
 
 	__skb_queue_tail(&flow->queue, skb);
-
-	if (fq->backlog > fq->limit) {
+	oom = (fq->memory_usage > fq->memory_limit);
+	while (fq->backlog > fq->limit || oom) {
 		flow = list_first_entry_or_null(&fq->backlogs,
 						struct fq_flow,
 						backlogchain);
@@ -181,7 +197,50 @@ static void fq_tin_enqueue(struct fq *fq,
 
 		flow->tin->overlimit++;
 		fq->overlimit++;
+		if (oom) {
+			fq->overmemory++;
+			oom = (fq->memory_usage > fq->memory_limit);
+		}
 	}
+}
+
+static void fq_flow_filter(struct fq *fq,
+			   struct fq_flow *flow,
+			   fq_skb_filter_t filter_func,
+			   void *filter_data,
+			   fq_skb_free_t free_func)
+{
+	struct fq_tin *tin = flow->tin;
+	struct sk_buff *skb, *tmp;
+
+	lockdep_assert_held(&fq->lock);
+
+	skb_queue_walk_safe(&flow->queue, skb, tmp) {
+		if (!filter_func(fq, tin, flow, skb, filter_data))
+			continue;
+
+		__skb_unlink(skb, &flow->queue);
+		fq_adjust_removal(fq, flow, skb);
+		free_func(fq, tin, flow, skb);
+	}
+
+	fq_rejigger_backlog(fq, flow);
+}
+
+static void fq_tin_filter(struct fq *fq,
+			  struct fq_tin *tin,
+			  fq_skb_filter_t filter_func,
+			  void *filter_data,
+			  fq_skb_free_t free_func)
+{
+	struct fq_flow *flow;
+
+	lockdep_assert_held(&fq->lock);
+
+	list_for_each_entry(flow, &tin->new_flows, flowchain)
+		fq_flow_filter(fq, flow, filter_func, filter_data, free_func);
+	list_for_each_entry(flow, &tin->old_flows, flowchain)
+		fq_flow_filter(fq, flow, filter_func, filter_data, free_func);
 }
 
 static void fq_flow_reset(struct fq *fq,
@@ -251,6 +310,7 @@ static int fq_init(struct fq *fq, int flows_cnt)
 	fq->perturbation = prandom_u32();
 	fq->quantum = 300;
 	fq->limit = 8192;
+	fq->memory_limit = 16 << 20; /* 16 MBytes */
 
 	fq->flows = kcalloc(fq->flows_cnt, sizeof(fq->flows[0]), GFP_KERNEL);
 	if (!fq->flows)

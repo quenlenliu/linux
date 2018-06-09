@@ -4,6 +4,17 @@
  *
  */
 
+/* Interim: Code-blocks with line nos - lines and line numbers don't line up.
+ * see: https://github.com/rtfd/sphinx_rtd_theme/issues/419
+ */
+
+div[class^="highlight"] pre {
+    line-height: normal;
+}
+.rst-content .highlight > pre {
+    line-height: normal;
+}
+
 @media screen {
 
     /* content column
@@ -42,6 +53,26 @@
     caption a.headerlink { opacity: 0; }
     caption a.headerlink:hover { opacity: 1; }
 
+    /* Menu selection and keystrokes */
+
+    span.menuselection {
+	color: blue;
+	font-family: "Courier New", Courier, monospace
+    }
+
+    code.kbd, code.kbd span {
+	color: white;
+	background-color: darkblue;
+	font-weight: bold;
+	font-family: "Courier New", Courier, monospace
+    }
+
+    /* fix bottom margin of lists items */
+
+    .rst-content .section ul li:last-child, .rst-content .section ul li p:last-child {
+          margin-bottom: 12px;
+    }
+
     /* inline literal: drop the borderbox, padding and red color */
 
     code, .rst-content tt, .rst-content code {
@@ -55,5 +86,4 @@
     .rst-content tt.literal,.rst-content tt.literal,.rst-content code.literal {
         color: inherit;
     }
-
 }

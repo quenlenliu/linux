@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -36,11 +37,11 @@
 
 #define DEBUG_SUBSYSTEM S_SEC
 
-#include "../include/obd_support.h"
-#include "../include/obd_cksum.h"
-#include "../include/obd_class.h"
-#include "../include/lustre_net.h"
-#include "../include/lustre_sec.h"
+#include <obd_support.h>
+#include <obd_cksum.h>
+#include <obd_class.h>
+#include <lustre_net.h>
+#include <lustre_sec.h>
 #include "ptlrpc_internal.h"
 
 struct plain_sec {
@@ -153,14 +154,16 @@ static void corrupt_bulk_data(struct ptlrpc_bulk_desc *desc)
 	char *ptr;
 	unsigned int off, i;
 
+	LASSERT(ptlrpc_is_bulk_desc_kiov(desc->bd_type));
+
 	for (i = 0; i < desc->bd_iov_count; i++) {
-		if (desc->bd_iov[i].kiov_len == 0)
+		if (!BD_GET_KIOV(desc, i).bv_len)
 			continue;
 
-		ptr = kmap(desc->bd_iov[i].kiov_page);
-		off = desc->bd_iov[i].kiov_offset & ~PAGE_MASK;
+		ptr = kmap(BD_GET_KIOV(desc, i).bv_page);
+		off = BD_GET_KIOV(desc, i).bv_offset & ~PAGE_MASK;
 		ptr[off] ^= 0x1;
-		kunmap(desc->bd_iov[i].kiov_page);
+		kunmap(BD_GET_KIOV(desc, i).bv_page);
 		return;
 	}
 }
@@ -249,9 +252,12 @@ int plain_ctx_verify(struct ptlrpc_cli_ctx *ctx, struct ptlrpc_request *req)
 		unsigned int hsize = 4;
 
 		cfs_crypto_hash_digest(CFS_HASH_ALG_CRC32,
-				lustre_msg_buf(msg, PLAIN_PACK_MSG_OFF, 0),
-				lustre_msg_buflen(msg, PLAIN_PACK_MSG_OFF),
-				NULL, 0, (unsigned char *)&cksum, &hsize);
+				       lustre_msg_buf(msg, PLAIN_PACK_MSG_OFF,
+						      0),
+				       lustre_msg_buflen(msg,
+							 PLAIN_PACK_MSG_OFF),
+				       NULL, 0, (unsigned char *)&cksum,
+				       &hsize);
 		if (cksum != msg->lm_cksum) {
 			CDEBUG(D_SEC,
 			       "early reply checksum mismatch: %08x != %08x\n",
@@ -349,11 +355,11 @@ int plain_cli_unwrap_bulk(struct ptlrpc_cli_ctx *ctx,
 
 	/* fix the actual data size */
 	for (i = 0, nob = 0; i < desc->bd_iov_count; i++) {
-		if (desc->bd_iov[i].kiov_len + nob > desc->bd_nob_transferred) {
-			desc->bd_iov[i].kiov_len =
-				desc->bd_nob_transferred - nob;
-		}
-		nob += desc->bd_iov[i].kiov_len;
+		struct bio_vec bv_desc = BD_GET_KIOV(desc, i);
+
+		if (bv_desc.bv_len + nob > desc->bd_nob_transferred)
+			bv_desc.bv_len = desc->bd_nob_transferred - nob;
+		nob += bv_desc.bv_len;
 	}
 
 	rc = plain_verify_bulk_csum(desc, req->rq_flvr.u_bulk.hash.hash_alg,
@@ -556,7 +562,7 @@ int plain_alloc_reqbuf(struct ptlrpc_sec *sec,
 		LASSERT(!req->rq_pool);
 
 		alloc_len = size_roundup_power2(alloc_len);
-		req->rq_reqbuf = libcfs_kvzalloc(alloc_len, GFP_NOFS);
+		req->rq_reqbuf = kvzalloc(alloc_len, GFP_NOFS);
 		if (!req->rq_reqbuf)
 			return -ENOMEM;
 
@@ -614,7 +620,7 @@ int plain_alloc_repbuf(struct ptlrpc_sec *sec,
 
 	alloc_len = size_roundup_power2(alloc_len);
 
-	req->rq_repbuf = libcfs_kvzalloc(alloc_len, GFP_NOFS);
+	req->rq_repbuf = kvzalloc(alloc_len, GFP_NOFS);
 	if (!req->rq_repbuf)
 		return -ENOMEM;
 
@@ -665,7 +671,7 @@ int plain_enlarge_reqbuf(struct ptlrpc_sec *sec,
 	if (req->rq_reqbuf_len < newbuf_size) {
 		newbuf_size = size_roundup_power2(newbuf_size);
 
-		newbuf = libcfs_kvzalloc(newbuf_size, GFP_NOFS);
+		newbuf = kvzalloc(newbuf_size, GFP_NOFS);
 		if (!newbuf)
 			return -ENOMEM;
 
@@ -802,7 +808,7 @@ int plain_alloc_rs(struct ptlrpc_request *req, int msgsize)
 		/* pre-allocated */
 		LASSERT(rs->rs_size >= rs_size);
 	} else {
-		rs = libcfs_kvzalloc(rs_size, GFP_NOFS);
+		rs = kvzalloc(rs_size, GFP_NOFS);
 		if (!rs)
 			return -ENOMEM;
 
@@ -869,9 +875,12 @@ int plain_authorize(struct ptlrpc_request *req)
 		unsigned int hsize = 4;
 
 		cfs_crypto_hash_digest(CFS_HASH_ALG_CRC32,
-			lustre_msg_buf(msg, PLAIN_PACK_MSG_OFF, 0),
-			lustre_msg_buflen(msg, PLAIN_PACK_MSG_OFF),
-			NULL, 0, (unsigned char *)&msg->lm_cksum, &hsize);
+				       lustre_msg_buf(msg, PLAIN_PACK_MSG_OFF,
+						      0),
+				       lustre_msg_buflen(msg,
+							 PLAIN_PACK_MSG_OFF),
+				       NULL, 0, (unsigned char *)&msg->lm_cksum,
+				       &hsize);
 		req->rq_reply_off = 0;
 	}
 

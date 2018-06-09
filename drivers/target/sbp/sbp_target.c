@@ -28,6 +28,7 @@
 #include <linux/string.h>
 #include <linux/configfs.h>
 #include <linux/ctype.h>
+#include <linux/delay.h>
 #include <linux/firewire.h>
 #include <linux/firewire-constants.h>
 #include <scsi/scsi_proto.h>
@@ -200,10 +201,9 @@ static struct sbp_session *sbp_session_create(
 	snprintf(guid_str, sizeof(guid_str), "%016llx", guid);
 
 	sess = kmalloc(sizeof(*sess), GFP_KERNEL);
-	if (!sess) {
-		pr_err("failed to allocate session descriptor\n");
+	if (!sess)
 		return ERR_PTR(-ENOMEM);
-	}
+
 	spin_lock_init(&sess->lock);
 	INIT_LIST_HEAD(&sess->login_list);
 	INIT_DELAYED_WORK(&sess->maint_work, session_maintenance_work);
@@ -928,7 +928,7 @@ static struct sbp_target_request *sbp_mgt_get_req(struct sbp_session *sess,
 	struct sbp_target_request *req;
 	int tag;
 
-	tag = percpu_ida_alloc(&se_sess->sess_tag_pool, GFP_ATOMIC);
+	tag = percpu_ida_alloc(&se_sess->sess_tag_pool, TASK_RUNNING);
 	if (tag < 0)
 		return ERR_PTR(-ENOMEM);
 
@@ -2028,10 +2028,8 @@ static struct se_portal_group *sbp_make_tpg(
 	}
 
 	tpg = kzalloc(sizeof(*tpg), GFP_KERNEL);
-	if (!tpg) {
-		pr_err("Unable to allocate struct sbp_tpg\n");
+	if (!tpg)
 		return ERR_PTR(-ENOMEM);
-	}
 
 	tpg->tport = tport;
 	tpg->tport_tpgt = tpgt;
@@ -2087,10 +2085,8 @@ static struct se_wwn *sbp_make_tport(
 		return ERR_PTR(-EINVAL);
 
 	tport = kzalloc(sizeof(*tport), GFP_KERNEL);
-	if (!tport) {
-		pr_err("Unable to allocate struct sbp_tport\n");
+	if (!tport)
 		return ERR_PTR(-ENOMEM);
-	}
 
 	tport->guid = guid;
 	sbp_format_wwn(tport->tport_name, SBP_NAMELEN, guid);

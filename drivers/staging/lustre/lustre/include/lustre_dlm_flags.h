@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*  -*- buffer-read-only: t -*- vi: set ro:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -27,21 +28,6 @@
 
 /** l_flags bits marked as "all_flags" bits */
 #define LDLM_FL_ALL_FLAGS_MASK          0x00FFFFFFC08F932FULL
-
-/** l_flags bits marked as "ast" bits */
-#define LDLM_FL_AST_MASK                0x0000000080008000ULL
-
-/** l_flags bits marked as "blocked" bits */
-#define LDLM_FL_BLOCKED_MASK            0x000000000000000EULL
-
-/** l_flags bits marked as "gone" bits */
-#define LDLM_FL_GONE_MASK               0x0006004000000000ULL
-
-/** l_flags bits marked as "inherit" bits */
-#define LDLM_FL_INHERIT_MASK            0x0000000000800000ULL
-
-/** l_flags bits marked as "off_wire" bits */
-#define LDLM_FL_OFF_WIRE_MASK           0x00FFFFFF00000000ULL
 
 /** extent, mode, or resource changed */
 #define LDLM_FL_LOCK_CHANGED            0x0000000000000001ULL /* bit 0 */
@@ -136,6 +122,9 @@
 #define ldlm_set_test_lock(_l)          LDLM_SET_FLAG((_l), 1ULL << 19)
 #define ldlm_clear_test_lock(_l)        LDLM_CLEAR_FLAG((_l), 1ULL << 19)
 
+/** match lock only */
+#define LDLM_FL_MATCH_LOCK		0x0000000000100000ULL /* bit  20 */
+
 /**
  * Immediately cancel such locks when they block some other locks. Send
  * cancel notification to original lock holder, but expect no reply. This
@@ -148,7 +137,8 @@
 #define ldlm_clear_cancel_on_block(_l)  LDLM_CLEAR_FLAG((_l), 1ULL << 23)
 
 /**
- * measure lock contention and return -EUSERS if locking contention is high */
+ * measure lock contention and return -EUSERS if locking contention is high
+ */
 #define LDLM_FL_DENY_ON_CONTENTION        0x0000000040000000ULL /* bit 30 */
 #define ldlm_is_deny_on_contention(_l)    LDLM_TEST_FLAG((_l), 1ULL << 30)
 #define ldlm_set_deny_on_contention(_l)   LDLM_SET_FLAG((_l), 1ULL << 30)
@@ -156,7 +146,8 @@
 
 /**
  * These are flags that are mapped into the flags and ASTs of blocking
- * locks Add FL_DISCARD to blocking ASTs */
+ * locks Add FL_DISCARD to blocking ASTs
+ */
 #define LDLM_FL_AST_DISCARD_DATA        0x0000000080000000ULL /* bit 31 */
 #define ldlm_is_ast_discard_data(_l)    LDLM_TEST_FLAG((_l), 1ULL << 31)
 #define ldlm_set_ast_discard_data(_l)   LDLM_SET_FLAG((_l), 1ULL << 31)
@@ -371,6 +362,27 @@
 #define ldlm_is_excl(_l)                LDLM_TEST_FLAG((_l), 1ULL << 55)
 #define ldlm_set_excl(_l)               LDLM_SET_FLAG((_l), 1ULL << 55)
 #define ldlm_clear_excl(_l)             LDLM_CLEAR_FLAG((_l), 1ULL << 55)
+
+/** l_flags bits marked as "ast" bits */
+#define LDLM_FL_AST_MASK		(LDLM_FL_FLOCK_DEADLOCK		|\
+					 LDLM_FL_AST_DISCARD_DATA)
+
+/** l_flags bits marked as "blocked" bits */
+#define LDLM_FL_BLOCKED_MASK		(LDLM_FL_BLOCK_GRANTED		|\
+					 LDLM_FL_BLOCK_CONV		|\
+					 LDLM_FL_BLOCK_WAIT)
+
+/** l_flags bits marked as "gone" bits */
+#define LDLM_FL_GONE_MASK		(LDLM_FL_DESTROYED		|\
+					 LDLM_FL_FAILED)
+
+/** l_flags bits marked as "inherit" bits */
+/* Flags inherited from wire on enqueue/reply between client/server. */
+/* NO_TIMEOUT flag to force ldlm_lock_match() to wait with no timeout. */
+/* TEST_LOCK flag to not let TEST lock to be granted. */
+#define LDLM_FL_INHERIT_MASK		(LDLM_FL_CANCEL_ON_BLOCK	|\
+					 LDLM_FL_NO_TIMEOUT		|\
+					 LDLM_FL_TEST_LOCK)
 
 /** test for ldlm_lock flag bit set */
 #define LDLM_TEST_FLAG(_l, _b)        (((_l)->l_flags & (_b)) != 0)

@@ -53,7 +53,9 @@ static int ncsi_aen_handler_lsc(struct ncsi_dev_priv *ndp,
 	struct ncsi_aen_lsc_pkt *lsc;
 	struct ncsi_channel *nc;
 	struct ncsi_channel_mode *ncm;
-	unsigned long old_data;
+	bool chained;
+	int state;
+	unsigned long old_data, data;
 	unsigned long flags;
 
 	/* Find the NCSI channel */
@@ -62,20 +64,30 @@ static int ncsi_aen_handler_lsc(struct ncsi_dev_priv *ndp,
 		return -ENODEV;
 
 	/* Update the link status */
-	ncm = &nc->modes[NCSI_MODE_LINK];
 	lsc = (struct ncsi_aen_lsc_pkt *)h;
+
+	spin_lock_irqsave(&nc->lock, flags);
+	ncm = &nc->modes[NCSI_MODE_LINK];
 	old_data = ncm->data[2];
-	ncm->data[2] = ntohl(lsc->status);
+	data = ntohl(lsc->status);
+	ncm->data[2] = data;
 	ncm->data[4] = ntohl(lsc->oem_status);
-	if (!((old_data ^ ncm->data[2]) & 0x1) ||
-	    !list_empty(&nc->link))
+
+	netdev_info(ndp->ndev.dev, "NCSI: LSC AEN - channel %u state %s\n",
+		    nc->id, data & 0x1 ? "up" : "down");
+
+	chained = !list_empty(&nc->link);
+	state = nc->state;
+	spin_unlock_irqrestore(&nc->lock, flags);
+
+	if (!((old_data ^ data) & 0x1) || chained)
 		return 0;
-	if (!(nc->state == NCSI_CHANNEL_INACTIVE && (ncm->data[2] & 0x1)) &&
-	    !(nc->state == NCSI_CHANNEL_ACTIVE && !(ncm->data[2] & 0x1)))
+	if (!(state == NCSI_CHANNEL_INACTIVE && (data & 0x1)) &&
+	    !(state == NCSI_CHANNEL_ACTIVE && !(data & 0x1)))
 		return 0;
 
 	if (!(ndp->flags & NCSI_DEV_HWA) &&
-	    nc->state == NCSI_CHANNEL_ACTIVE)
+	    state == NCSI_CHANNEL_ACTIVE)
 		ndp->flags |= NCSI_DEV_RESHUFFLE;
 
 	ncsi_stop_channel_monitor(nc);
@@ -97,13 +109,21 @@ static int ncsi_aen_handler_cr(struct ncsi_dev_priv *ndp,
 	if (!nc)
 		return -ENODEV;
 
+	spin_lock_irqsave(&nc->lock, flags);
 	if (!list_empty(&nc->link) ||
-	    nc->state != NCSI_CHANNEL_ACTIVE)
+	    nc->state != NCSI_CHANNEL_ACTIVE) {
+		spin_unlock_irqrestore(&nc->lock, flags);
 		return 0;
+	}
+	spin_unlock_irqrestore(&nc->lock, flags);
 
 	ncsi_stop_channel_monitor(nc);
+	spin_lock_irqsave(&nc->lock, flags);
+	nc->state = NCSI_CHANNEL_INVISIBLE;
+	spin_unlock_irqrestore(&nc->lock, flags);
+
 	spin_lock_irqsave(&ndp->lock, flags);
-	xchg(&nc->state, NCSI_CHANNEL_INACTIVE);
+	nc->state = NCSI_CHANNEL_INACTIVE;
 	list_add_tail_rcu(&nc->link, &ndp->channel_queue);
 	spin_unlock_irqrestore(&ndp->lock, flags);
 
@@ -123,29 +143,14 @@ static int ncsi_aen_handler_hncdsc(struct ncsi_dev_priv *ndp,
 	if (!nc)
 		return -ENODEV;
 
-	/* If the channel is active one, we need reconfigure it */
+	spin_lock_irqsave(&nc->lock, flags);
 	ncm = &nc->modes[NCSI_MODE_LINK];
 	hncdsc = (struct ncsi_aen_hncdsc_pkt *)h;
 	ncm->data[3] = ntohl(hncdsc->status);
-	if (!list_empty(&nc->link) ||
-	    nc->state != NCSI_CHANNEL_ACTIVE ||
-	    (ncm->data[3] & 0x1))
-		return 0;
-
-	if (ndp->flags & NCSI_DEV_HWA)
-		ndp->flags |= NCSI_DEV_RESHUFFLE;
-
-	/* If this channel is the active one and the link doesn't
-	 * work, we have to choose another channel to be active one.
-	 * The logic here is exactly similar to what we do when link
-	 * is down on the active channel.
-	 */
-	ncsi_stop_channel_monitor(nc);
-	spin_lock_irqsave(&ndp->lock, flags);
-	list_add_tail_rcu(&nc->link, &ndp->channel_queue);
-	spin_unlock_irqrestore(&ndp->lock, flags);
-
-	ncsi_process_next_channel(ndp);
+	spin_unlock_irqrestore(&nc->lock, flags);
+	netdev_printk(KERN_DEBUG, ndp->ndev.dev,
+		      "NCSI: host driver %srunning on channel %u\n",
+		      ncm->data[3] & 0x1 ? "" : "not ", nc->id);
 
 	return 0;
 }
@@ -158,7 +163,7 @@ static struct ncsi_aen_handler {
 } ncsi_aen_handlers[] = {
 	{ NCSI_PKT_AEN_LSC,    12, ncsi_aen_handler_lsc    },
 	{ NCSI_PKT_AEN_CR,      4, ncsi_aen_handler_cr     },
-	{ NCSI_PKT_AEN_HNCDSC,  4, ncsi_aen_handler_hncdsc }
+	{ NCSI_PKT_AEN_HNCDSC,  8, ncsi_aen_handler_hncdsc }
 };
 
 int ncsi_aen_handler(struct ncsi_dev_priv *ndp, struct sk_buff *skb)
@@ -183,10 +188,18 @@ int ncsi_aen_handler(struct ncsi_dev_priv *ndp, struct sk_buff *skb)
 	}
 
 	ret = ncsi_validate_aen_pkt(h, nah->payload);
-	if (ret)
+	if (ret) {
+		netdev_warn(ndp->ndev.dev,
+			    "NCSI: 'bad' packet ignored for AEN type 0x%x\n",
+			    h->type);
 		goto out;
+	}
 
 	ret = nah->handler(ndp, h);
+	if (ret)
+		netdev_err(ndp->ndev.dev,
+			   "NCSI: Handler for AEN type 0x%x returned %d\n",
+			   h->type, ret);
 out:
 	consume_skb(skb);
 	return ret;

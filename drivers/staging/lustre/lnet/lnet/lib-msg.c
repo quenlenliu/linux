@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -36,10 +37,10 @@
 
 #define DEBUG_SUBSYSTEM S_LNET
 
-#include "../../include/linux/lnet/lib-lnet.h"
+#include <linux/lnet/lib-lnet.h>
 
 void
-lnet_build_unlink_event(lnet_libmd_t *md, lnet_event_t *ev)
+lnet_build_unlink_event(struct lnet_libmd *md, struct lnet_event *ev)
 {
 	memset(ev, 0, sizeof(*ev));
 
@@ -54,10 +55,10 @@ lnet_build_unlink_event(lnet_libmd_t *md, lnet_event_t *ev)
  * Don't need any lock, must be called after lnet_commit_md
  */
 void
-lnet_build_msg_event(lnet_msg_t *msg, lnet_event_kind_t ev_type)
+lnet_build_msg_event(struct lnet_msg *msg, enum lnet_event_kind ev_type)
 {
-	lnet_hdr_t *hdr = &msg->msg_hdr;
-	lnet_event_t *ev  = &msg->msg_ev;
+	struct lnet_hdr *hdr = &msg->msg_hdr;
+	struct lnet_event *ev  = &msg->msg_ev;
 
 	LASSERT(!msg->msg_routing);
 
@@ -129,10 +130,10 @@ lnet_build_msg_event(lnet_msg_t *msg, lnet_event_kind_t ev_type)
 }
 
 void
-lnet_msg_commit(lnet_msg_t *msg, int cpt)
+lnet_msg_commit(struct lnet_msg *msg, int cpt)
 {
 	struct lnet_msg_container *container = the_lnet.ln_msg_containers[cpt];
-	lnet_counters_t *counters  = the_lnet.ln_counters[cpt];
+	struct lnet_counters *counters  = the_lnet.ln_counters[cpt];
 
 	/* routed message can be committed for both receiving and sending */
 	LASSERT(!msg->msg_tx_committed);
@@ -162,10 +163,10 @@ lnet_msg_commit(lnet_msg_t *msg, int cpt)
 }
 
 static void
-lnet_msg_decommit_tx(lnet_msg_t *msg, int status)
+lnet_msg_decommit_tx(struct lnet_msg *msg, int status)
 {
-	lnet_counters_t	*counters;
-	lnet_event_t *ev = &msg->msg_ev;
+	struct lnet_counters	*counters;
+	struct lnet_event *ev = &msg->msg_ev;
 
 	LASSERT(msg->msg_tx_committed);
 	if (status)
@@ -214,10 +215,10 @@ lnet_msg_decommit_tx(lnet_msg_t *msg, int status)
 }
 
 static void
-lnet_msg_decommit_rx(lnet_msg_t *msg, int status)
+lnet_msg_decommit_rx(struct lnet_msg *msg, int status)
 {
-	lnet_counters_t *counters;
-	lnet_event_t *ev = &msg->msg_ev;
+	struct lnet_counters *counters;
+	struct lnet_event *ev = &msg->msg_ev;
 
 	LASSERT(!msg->msg_tx_committed); /* decommitted or never committed */
 	LASSERT(msg->msg_rx_committed);
@@ -272,7 +273,7 @@ lnet_msg_decommit_rx(lnet_msg_t *msg, int status)
 }
 
 void
-lnet_msg_decommit(lnet_msg_t *msg, int cpt, int status)
+lnet_msg_decommit(struct lnet_msg *msg, int cpt, int status)
 {
 	int cpt2 = cpt;
 
@@ -306,7 +307,7 @@ lnet_msg_decommit(lnet_msg_t *msg, int cpt, int status)
 }
 
 void
-lnet_msg_attach_md(lnet_msg_t *msg, lnet_libmd_t *md,
+lnet_msg_attach_md(struct lnet_msg *msg, struct lnet_libmd *md,
 		   unsigned int offset, unsigned int mlen)
 {
 	/* NB: @offset and @len are only useful for receiving */
@@ -336,9 +337,9 @@ lnet_msg_attach_md(lnet_msg_t *msg, lnet_libmd_t *md,
 }
 
 void
-lnet_msg_detach_md(lnet_msg_t *msg, int status)
+lnet_msg_detach_md(struct lnet_msg *msg, int status)
 {
-	lnet_libmd_t *md = msg->msg_md;
+	struct lnet_libmd *md = msg->msg_md;
 	int unlink;
 
 	/* Now it's safe to drop my caller's ref */
@@ -359,9 +360,9 @@ lnet_msg_detach_md(lnet_msg_t *msg, int status)
 }
 
 static int
-lnet_complete_msg_locked(lnet_msg_t *msg, int cpt)
+lnet_complete_msg_locked(struct lnet_msg *msg, int cpt)
 {
-	lnet_handle_wire_t ack_wmd;
+	struct lnet_handle_wire ack_wmd;
 	int rc;
 	int status = msg->msg_ev.status;
 
@@ -432,12 +433,12 @@ lnet_complete_msg_locked(lnet_msg_t *msg, int cpt)
 	}
 
 	lnet_msg_decommit(msg, cpt, status);
-	lnet_msg_free(msg);
+	kfree(msg);
 	return 0;
 }
 
 void
-lnet_finalize(lnet_ni_t *ni, lnet_msg_t *msg, int status)
+lnet_finalize(struct lnet_ni *ni, struct lnet_msg *msg, int status)
 {
 	struct lnet_msg_container *container;
 	int my_slot;
@@ -449,23 +450,7 @@ lnet_finalize(lnet_ni_t *ni, lnet_msg_t *msg, int status)
 
 	if (!msg)
 		return;
-#if 0
-	CDEBUG(D_WARNING, "%s msg->%s Flags:%s%s%s%s%s%s%s%s%s%s%s txp %s rxp %s\n",
-	       lnet_msgtyp2str(msg->msg_type), libcfs_id2str(msg->msg_target),
-	       msg->msg_target_is_router ? "t" : "",
-	       msg->msg_routing ? "X" : "",
-	       msg->msg_ack ? "A" : "",
-	       msg->msg_sending ? "S" : "",
-	       msg->msg_receiving ? "R" : "",
-	       msg->msg_delayed ? "d" : "",
-	       msg->msg_txcredit ? "C" : "",
-	       msg->msg_peertxcredit ? "c" : "",
-	       msg->msg_rtrcredit ? "F" : "",
-	       msg->msg_peerrtrcredit ? "f" : "",
-	       msg->msg_onactivelist ? "!" : "",
-	       !msg->msg_txpeer ? "<none>" : libcfs_nid2str(msg->msg_txpeer->lp_nid),
-	       !msg->msg_rxpeer ? "<none>" : libcfs_nid2str(msg->msg_rxpeer->lp_nid));
-#endif
+
 	msg->msg_ev.status = status;
 
 	if (msg->msg_md) {
@@ -481,7 +466,7 @@ lnet_finalize(lnet_ni_t *ni, lnet_msg_t *msg, int status)
 	if (!msg->msg_tx_committed && !msg->msg_rx_committed) {
 		/* not committed to network yet */
 		LASSERT(!msg->msg_onactivelist);
-		lnet_msg_free(msg);
+		kfree(msg);
 		return;
 	}
 
@@ -518,7 +503,7 @@ lnet_finalize(lnet_ni_t *ni, lnet_msg_t *msg, int status)
 
 	while (!list_empty(&container->msc_finalizing)) {
 		msg = list_entry(container->msc_finalizing.next,
-				 lnet_msg_t, msg_list);
+				 struct lnet_msg, msg_list);
 
 		list_del(&msg->msg_list);
 
@@ -554,25 +539,22 @@ lnet_msg_container_cleanup(struct lnet_msg_container *container)
 		return;
 
 	while (!list_empty(&container->msc_active)) {
-		lnet_msg_t *msg = list_entry(container->msc_active.next,
-					     lnet_msg_t, msg_activelist);
+		struct lnet_msg *msg;
 
+		msg = list_entry(container->msc_active.next,
+				 struct lnet_msg, msg_activelist);
 		LASSERT(msg->msg_onactivelist);
 		msg->msg_onactivelist = 0;
 		list_del(&msg->msg_activelist);
-		lnet_msg_free(msg);
+		kfree(msg);
 		count++;
 	}
 
 	if (count > 0)
 		CERROR("%d active msg on exit\n", count);
 
-	if (container->msc_finalizers) {
-		LIBCFS_FREE(container->msc_finalizers,
-			    container->msc_nfinalizers *
-			    sizeof(*container->msc_finalizers));
-		container->msc_finalizers = NULL;
-	}
+	kvfree(container->msc_finalizers);
+	container->msc_finalizers = NULL;
 	container->msc_init = 0;
 }
 
@@ -587,9 +569,9 @@ lnet_msg_container_setup(struct lnet_msg_container *container, int cpt)
 	/* number of CPUs */
 	container->msc_nfinalizers = cfs_cpt_weight(lnet_cpt_table(), cpt);
 
-	LIBCFS_CPT_ALLOC(container->msc_finalizers, lnet_cpt_table(), cpt,
-			 container->msc_nfinalizers *
-			 sizeof(*container->msc_finalizers));
+	container->msc_finalizers = kvzalloc_cpt(container->msc_nfinalizers *
+						 sizeof(*container->msc_finalizers),
+						 GFP_KERNEL, cpt);
 
 	if (!container->msc_finalizers) {
 		CERROR("Failed to allocate message finalizers\n");

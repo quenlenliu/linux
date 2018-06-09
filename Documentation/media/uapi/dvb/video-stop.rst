@@ -11,11 +11,13 @@ Name
 
 VIDEO_STOP
 
+.. attention:: This ioctl is deprecated.
 
 Synopsis
 --------
 
-.. cpp:function:: int ioctl(fd, int request = VIDEO_STOP, boolean mode)
+.. c:function:: int ioctl(fd, VIDEO_STOP, boolean mode)
+    :name: VIDEO_STOP
 
 
 Arguments
@@ -58,7 +60,7 @@ Arguments
 Description
 -----------
 
-This ioctl is for DVB devices only. To control a V4L2 decoder use the
+This ioctl is for Digital TV devices only. To control a V4L2 decoder use the
 V4L2 :ref:`VIDIOC_DECODER_CMD` instead.
 
 This ioctl call asks the Video Device to stop playing the current

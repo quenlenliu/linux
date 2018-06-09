@@ -1,13 +1,6 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  */
 
 #ifndef _CORESIGHT_CORESIGHT_ETM_H
@@ -89,11 +82,13 @@
 /* ETMCR - 0x00 */
 #define ETMCR_PWD_DWN		BIT(0)
 #define ETMCR_STALL_MODE	BIT(7)
+#define ETMCR_BRANCH_BROADCAST	BIT(8)
 #define ETMCR_ETM_PRG		BIT(10)
 #define ETMCR_ETM_EN		BIT(11)
 #define ETMCR_CYC_ACC		BIT(12)
 #define ETMCR_CTXID_SIZE	(BIT(14)|BIT(15))
 #define ETMCR_TIMESTAMP_EN	BIT(28)
+#define ETMCR_RETURN_STACK	BIT(29)
 /* ETMCCR - 0x04 */
 #define ETMCCR_FIFOFULL		BIT(23)
 /* ETMPDCR - 0x310 */
@@ -104,14 +99,18 @@
 #define ETMTECR1_START_STOP	BIT(25)
 /* ETMCCER - 0x1E8 */
 #define ETMCCER_TIMESTAMP	BIT(22)
+#define ETMCCER_RETSTACK	BIT(23)
 
 #define ETM_MODE_EXCLUDE	BIT(0)
 #define ETM_MODE_CYCACC		BIT(1)
 #define ETM_MODE_STALL		BIT(2)
 #define ETM_MODE_TIMESTAMP	BIT(3)
 #define ETM_MODE_CTXID		BIT(4)
+#define ETM_MODE_BBROAD		BIT(5)
+#define ETM_MODE_RET_STACK	BIT(6)
 #define ETM_MODE_ALL		(ETM_MODE_EXCLUDE | ETM_MODE_CYCACC | \
 				 ETM_MODE_STALL | ETM_MODE_TIMESTAMP | \
+				 ETM_MODE_BBROAD | ETM_MODE_RET_STACK | \
 				 ETM_MODE_CTXID | ETM_MODE_EXCL_KERN | \
 				 ETM_MODE_EXCL_USER)
 
@@ -257,14 +256,6 @@ struct etm_drvdata {
 	u32				etmccer;
 	u32				traceid;
 	struct etm_config		config;
-};
-
-enum etm_addr_type {
-	ETM_ADDR_TYPE_NONE,
-	ETM_ADDR_TYPE_SINGLE,
-	ETM_ADDR_TYPE_RANGE,
-	ETM_ADDR_TYPE_START,
-	ETM_ADDR_TYPE_STOP,
 };
 
 static inline void etm_writel(struct etm_drvdata *drvdata,

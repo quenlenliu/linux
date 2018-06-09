@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * 8250_dma.c - DMA Engine API support for 8250.c
  *
  * Copyright (C) 2013 Intel Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
@@ -72,9 +68,14 @@ int serial8250_tx_dma(struct uart_8250_port *p)
 	struct dma_async_tx_descriptor	*desc;
 	int ret;
 
-	if (uart_tx_stopped(&p->port) || dma->tx_running ||
-	    uart_circ_empty(xmit))
+	if (dma->tx_running)
 		return 0;
+
+	if (uart_tx_stopped(&p->port) || uart_circ_empty(xmit)) {
+		/* We have been called from __dma_tx_complete() */
+		serial8250_rpm_put_tx(p);
+		return 0;
+	}
 
 	dma->tx_size = CIRC_CNT_TO_END(xmit->head, xmit->tail, UART_XMIT_SIZE);
 
@@ -142,7 +143,7 @@ void serial8250_rx_dma_flush(struct uart_8250_port *p)
 	if (dma->rx_running) {
 		dmaengine_pause(dma->rxchan);
 		__dma_rx_complete(p);
-		dmaengine_terminate_all(dma->rxchan);
+		dmaengine_terminate_async(dma->rxchan);
 	}
 }
 EXPORT_SYMBOL_GPL(serial8250_rx_dma_flush);
@@ -150,6 +151,10 @@ EXPORT_SYMBOL_GPL(serial8250_rx_dma_flush);
 int serial8250_request_dma(struct uart_8250_port *p)
 {
 	struct uart_8250_dma	*dma = p->dma;
+	phys_addr_t rx_dma_addr = dma->rx_dma_addr ?
+				  dma->rx_dma_addr : p->port.mapbase;
+	phys_addr_t tx_dma_addr = dma->tx_dma_addr ?
+				  dma->tx_dma_addr : p->port.mapbase;
 	dma_cap_mask_t		mask;
 	struct dma_slave_caps	caps;
 	int			ret;
@@ -157,11 +162,11 @@ int serial8250_request_dma(struct uart_8250_port *p)
 	/* Default slave configuration parameters */
 	dma->rxconf.direction		= DMA_DEV_TO_MEM;
 	dma->rxconf.src_addr_width	= DMA_SLAVE_BUSWIDTH_1_BYTE;
-	dma->rxconf.src_addr		= p->port.mapbase + UART_RX;
+	dma->rxconf.src_addr		= rx_dma_addr + UART_RX;
 
 	dma->txconf.direction		= DMA_MEM_TO_DEV;
 	dma->txconf.dst_addr_width	= DMA_SLAVE_BUSWIDTH_1_BYTE;
-	dma->txconf.dst_addr		= p->port.mapbase + UART_TX;
+	dma->txconf.dst_addr		= tx_dma_addr + UART_TX;
 
 	dma_cap_zero(mask);
 	dma_cap_set(DMA_SLAVE, mask);
@@ -247,14 +252,14 @@ void serial8250_release_dma(struct uart_8250_port *p)
 		return;
 
 	/* Release RX resources */
-	dmaengine_terminate_all(dma->rxchan);
+	dmaengine_terminate_sync(dma->rxchan);
 	dma_free_coherent(dma->rxchan->device->dev, dma->rx_size, dma->rx_buf,
 			  dma->rx_addr);
 	dma_release_channel(dma->rxchan);
 	dma->rxchan = NULL;
 
 	/* Release TX resources */
-	dmaengine_terminate_all(dma->txchan);
+	dmaengine_terminate_sync(dma->txchan);
 	dma_unmap_single(dma->txchan->device->dev, dma->tx_addr,
 			 UART_XMIT_SIZE, DMA_TO_DEVICE);
 	dma_release_channel(dma->txchan);

@@ -208,7 +208,7 @@ static struct hdmi *msm_hdmi_init(struct platform_device *pdev)
 	for (i = 0; i < config->hpd_clk_cnt; i++) {
 		struct clk *clk;
 
-		clk = devm_clk_get(&pdev->dev, config->hpd_clk_names[i]);
+		clk = msm_clk_get(pdev, config->hpd_clk_names[i]);
 		if (IS_ERR(clk)) {
 			ret = PTR_ERR(clk);
 			dev_err(&pdev->dev, "failed to get hpd clk: %s (%d)\n",
@@ -228,7 +228,7 @@ static struct hdmi *msm_hdmi_init(struct platform_device *pdev)
 	for (i = 0; i < config->pwr_clk_cnt; i++) {
 		struct clk *clk;
 
-		clk = devm_clk_get(&pdev->dev, config->pwr_clk_names[i]);
+		clk = msm_clk_get(pdev, config->pwr_clk_names[i]);
 		if (IS_ERR(clk)) {
 			ret = PTR_ERR(clk);
 			dev_err(&pdev->dev, "failed to get pwr clk: %s (%d)\n",
@@ -238,6 +238,8 @@ static struct hdmi *msm_hdmi_init(struct platform_device *pdev)
 
 		hdmi->pwr_clks[i] = clk;
 	}
+
+	pm_runtime_enable(&pdev->dev);
 
 	hdmi->workq = alloc_ordered_workqueue("msm_hdmi", 0);
 
@@ -359,7 +361,7 @@ static const char *hpd_reg_names_none[] = {};
 static struct hdmi_platform_config hdmi_tx_8660_config;
 
 static const char *hpd_reg_names_8960[] = {"core-vdda", "hdmi-mux"};
-static const char *hpd_clk_names_8960[] = {"core_clk", "master_iface_clk", "slave_iface_clk"};
+static const char *hpd_clk_names_8960[] = {"core", "master_iface", "slave_iface"};
 
 static struct hdmi_platform_config hdmi_tx_8960_config = {
 		HDMI_CFG(hpd_reg, 8960),
@@ -368,8 +370,8 @@ static struct hdmi_platform_config hdmi_tx_8960_config = {
 
 static const char *pwr_reg_names_8x74[] = {"core-vdda", "core-vcc"};
 static const char *hpd_reg_names_8x74[] = {"hpd-gdsc", "hpd-5v"};
-static const char *pwr_clk_names_8x74[] = {"extp_clk", "alt_iface_clk"};
-static const char *hpd_clk_names_8x74[] = {"iface_clk", "core_clk", "mdp_core_clk"};
+static const char *pwr_clk_names_8x74[] = {"extp", "alt_iface"};
+static const char *hpd_clk_names_8x74[] = {"iface", "core", "mdp_core"};
 static unsigned long hpd_clk_freq_8x74[] = {0, 19200000, 0};
 
 static struct hdmi_platform_config hdmi_tx_8974_config = {
@@ -422,11 +424,28 @@ static const struct {
 
 static int msm_hdmi_get_gpio(struct device_node *of_node, const char *name)
 {
-	int gpio = of_get_named_gpio(of_node, name, 0);
+	int gpio;
+
+	/* try with the gpio names as in the table (downstream bindings) */
+	gpio = of_get_named_gpio(of_node, name, 0);
 	if (gpio < 0) {
 		char name2[32];
-		snprintf(name2, sizeof(name2), "%s-gpio", name);
+
+		/* try with the gpio names as in the upstream bindings */
+		snprintf(name2, sizeof(name2), "%s-gpios", name);
 		gpio = of_get_named_gpio(of_node, name2, 0);
+		if (gpio < 0) {
+			char name3[32];
+
+			/*
+			 * try again after stripping out the "qcom,hdmi-tx"
+			 * prefix. This is mainly to match "hpd-gpios" used
+			 * in the upstream bindings
+			 */
+			if (sscanf(name2, "qcom,hdmi-tx-%s", name3))
+				gpio = of_get_named_gpio(of_node, name3, 0);
+		}
+
 		if (gpio < 0) {
 			DBG("failed to get gpio: %s (%d)", name, gpio);
 			gpio = -1;

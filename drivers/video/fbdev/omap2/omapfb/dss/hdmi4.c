@@ -100,7 +100,6 @@ static irqreturn_t hdmi_irq_handler(int irq, void *data)
 
 static int hdmi_init_regulator(void)
 {
-	int r;
 	struct regulator *reg;
 
 	if (hdmi.vdda_reg != NULL)
@@ -112,13 +111,6 @@ static int hdmi_init_regulator(void)
 		if (PTR_ERR(reg) != -EPROBE_DEFER)
 			DSSERR("can't get VDDA regulator\n");
 		return PTR_ERR(reg);
-	}
-
-	r = regulator_set_voltage(reg, 1800000, 1800000);
-	if (r) {
-		devm_regulator_put(reg);
-		DSSWARN("can't set the regulator voltage\n");
-		return r;
 	}
 
 	hdmi.vdda_reg = reg;
@@ -672,7 +664,7 @@ static int hdmi_audio_register(struct device *dev)
 {
 	struct omap_hdmi_audio_pdata pdata = {
 		.dev = dev,
-		.dss_version = omapdss_get_version(),
+		.version = 4,
 		.audio_dma_addr = hdmi_wp_get_audio_dma_addr(&hdmi.wp),
 		.ops = &hdmi_audio_ops,
 	};
@@ -681,10 +673,7 @@ static int hdmi_audio_register(struct device *dev)
 		dev, "omap-hdmi-audio", PLATFORM_DEVID_AUTO,
 		&pdata, sizeof(pdata));
 
-	if (IS_ERR(hdmi.audio_pdev))
-		return PTR_ERR(hdmi.audio_pdev);
-
-	return 0;
+	return PTR_ERR_OR_ZERO(hdmi.audio_pdev);
 }
 
 /* HDMI HW IP initialisation */

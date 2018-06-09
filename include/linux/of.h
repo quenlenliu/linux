@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 #ifndef _LINUX_OF_H
 #define _LINUX_OF_H
 /*
@@ -9,11 +10,6 @@
  * Updates for PPC64 by Peter Bergner & David Engebretsen, IBM Corp.
  * Updates for SPARC64 by David S. Miller
  * Derived from PowerPC and Sparc prom.h files by Stephen Rothwell, IBM Corp.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #include <linux/types.h>
 #include <linux/bitops.h>
@@ -37,9 +33,15 @@ struct property {
 	int	length;
 	void	*value;
 	struct property *next;
+#if defined(CONFIG_OF_DYNAMIC) || defined(CONFIG_SPARC)
 	unsigned long _flags;
+#endif
+#if defined(CONFIG_OF_PROMTREE)
 	unsigned int unique_id;
+#endif
+#if defined(CONFIG_OF_KOBJ)
 	struct bin_attribute attr;
+#endif
 };
 
 #if defined(CONFIG_SPARC)
@@ -58,7 +60,9 @@ struct device_node {
 	struct	device_node *parent;
 	struct	device_node *child;
 	struct	device_node *sibling;
+#if defined(CONFIG_OF_KOBJ)
 	struct	kobject kobj;
+#endif
 	unsigned long _flags;
 	void	*data;
 #if defined(CONFIG_SPARC)
@@ -100,23 +104,20 @@ struct of_reconfig_data {
 
 /* initialize a node */
 extern struct kobj_type of_node_ktype;
+extern const struct fwnode_operations of_fwnode_ops;
 static inline void of_node_init(struct device_node *node)
 {
+#if defined(CONFIG_OF_KOBJ)
 	kobject_init(&node->kobj, &of_node_ktype);
-	node->fwnode.type = FWNODE_OF;
+#endif
+	node->fwnode.ops = &of_fwnode_ops;
 }
 
-/* true when node is initialized */
-static inline int of_node_is_initialized(struct device_node *node)
-{
-	return node && node->kobj.state_initialized;
-}
-
-/* true when node is attached (i.e. present on sysfs) */
-static inline int of_node_is_attached(struct device_node *node)
-{
-	return node && node->kobj.state_in_sysfs;
-}
+#if defined(CONFIG_OF_KOBJ)
+#define of_node_kobj(n) (&(n)->kobj)
+#else
+#define of_node_kobj(n) NULL
+#endif
 
 #ifdef CONFIG_OF_DYNAMIC
 extern struct device_node *of_node_get(struct device_node *node);
@@ -148,16 +149,28 @@ extern raw_spinlock_t devtree_lock;
 #ifdef CONFIG_OF
 void of_core_init(void);
 
-static inline bool is_of_node(struct fwnode_handle *fwnode)
+static inline bool is_of_node(const struct fwnode_handle *fwnode)
 {
-	return !IS_ERR_OR_NULL(fwnode) && fwnode->type == FWNODE_OF;
+	return !IS_ERR_OR_NULL(fwnode) && fwnode->ops == &of_fwnode_ops;
 }
 
-static inline struct device_node *to_of_node(struct fwnode_handle *fwnode)
-{
-	return is_of_node(fwnode) ?
-		container_of(fwnode, struct device_node, fwnode) : NULL;
-}
+#define to_of_node(__fwnode)						\
+	({								\
+		typeof(__fwnode) __to_of_node_fwnode = (__fwnode);	\
+									\
+		is_of_node(__to_of_node_fwnode) ?			\
+			container_of(__to_of_node_fwnode,		\
+				     struct device_node, fwnode) :	\
+			NULL;						\
+	})
+
+#define of_fwnode_handle(node)						\
+	({								\
+		typeof(node) __of_fwnode_handle_node = (node);		\
+									\
+		__of_fwnode_handle_node ?				\
+			&__of_fwnode_handle_node->fwnode : NULL;	\
+	})
 
 static inline bool of_have_populated_dt(void)
 {
@@ -190,6 +203,7 @@ static inline void of_node_clear_flag(struct device_node *n, unsigned long flag)
 	clear_bit(flag, &n->_flags);
 }
 
+#if defined(CONFIG_OF_DYNAMIC) || defined(CONFIG_SPARC)
 static inline int of_property_check_flag(struct property *p, unsigned long flag)
 {
 	return test_bit(flag, &p->_flags);
@@ -204,6 +218,7 @@ static inline void of_property_clear_flag(struct property *p, unsigned long flag
 {
 	clear_bit(flag, &p->_flags);
 }
+#endif
 
 extern struct device_node *__of_find_all_nodes(struct device_node *prev);
 extern struct device_node *of_find_all_nodes(struct device_node *prev);
@@ -280,6 +295,7 @@ extern struct device_node *of_get_child_by_name(const struct device_node *node,
 
 /* cache lookup */
 extern struct device_node *of_find_next_cache_node(const struct device_node *);
+extern int of_find_last_cache_level(unsigned int cpu);
 extern struct device_node *of_find_node_with_property(
 	struct device_node *from, const char *prop_name);
 
@@ -291,20 +307,27 @@ extern int of_property_count_elems_of_size(const struct device_node *np,
 extern int of_property_read_u32_index(const struct device_node *np,
 				       const char *propname,
 				       u32 index, u32 *out_value);
-extern int of_property_read_u8_array(const struct device_node *np,
-			const char *propname, u8 *out_values, size_t sz);
-extern int of_property_read_u16_array(const struct device_node *np,
-			const char *propname, u16 *out_values, size_t sz);
-extern int of_property_read_u32_array(const struct device_node *np,
-				      const char *propname,
-				      u32 *out_values,
-				      size_t sz);
+extern int of_property_read_u64_index(const struct device_node *np,
+				       const char *propname,
+				       u32 index, u64 *out_value);
+extern int of_property_read_variable_u8_array(const struct device_node *np,
+					const char *propname, u8 *out_values,
+					size_t sz_min, size_t sz_max);
+extern int of_property_read_variable_u16_array(const struct device_node *np,
+					const char *propname, u16 *out_values,
+					size_t sz_min, size_t sz_max);
+extern int of_property_read_variable_u32_array(const struct device_node *np,
+					const char *propname,
+					u32 *out_values,
+					size_t sz_min,
+					size_t sz_max);
 extern int of_property_read_u64(const struct device_node *np,
 				const char *propname, u64 *out_value);
-extern int of_property_read_u64_array(const struct device_node *np,
-				      const char *propname,
-				      u64 *out_values,
-				      size_t sz);
+extern int of_property_read_variable_u64_array(const struct device_node *np,
+					const char *propname,
+					u64 *out_values,
+					size_t sz_min,
+					size_t sz_max);
 
 extern int of_property_read_string(const struct device_node *np,
 				   const char *propname,
@@ -339,6 +362,9 @@ extern struct device_node *of_parse_phandle(const struct device_node *np,
 					    int index);
 extern int of_parse_phandle_with_args(const struct device_node *np,
 	const char *list_name, const char *cells_name, int index,
+	struct of_phandle_args *out_args);
+extern int of_parse_phandle_with_args_map(const struct device_node *np,
+	const char *list_name, const char *stem_name, int index,
 	struct of_phandle_args *out_args);
 extern int of_parse_phandle_with_fixed_args(const struct device_node *np,
 	const char *list_name, int cells_count, int index,
@@ -380,6 +406,122 @@ extern int of_detach_node(struct device_node *);
 
 #define of_match_ptr(_ptr)	(_ptr)
 
+/**
+ * of_property_read_u8_array - Find and read an array of u8 from a property.
+ *
+ * @np:		device node from which the property value is to be read.
+ * @propname:	name of the property to be searched.
+ * @out_values:	pointer to return value, modified only if return value is 0.
+ * @sz:		number of array elements to read
+ *
+ * Search for a property in a device node and read 8-bit value(s) from
+ * it. Returns 0 on success, -EINVAL if the property does not exist,
+ * -ENODATA if property does not have a value, and -EOVERFLOW if the
+ * property data isn't large enough.
+ *
+ * dts entry of array should be like:
+ *	property = /bits/ 8 <0x50 0x60 0x70>;
+ *
+ * The out_values is modified only if a valid u8 value can be decoded.
+ */
+static inline int of_property_read_u8_array(const struct device_node *np,
+					    const char *propname,
+					    u8 *out_values, size_t sz)
+{
+	int ret = of_property_read_variable_u8_array(np, propname, out_values,
+						     sz, 0);
+	if (ret >= 0)
+		return 0;
+	else
+		return ret;
+}
+
+/**
+ * of_property_read_u16_array - Find and read an array of u16 from a property.
+ *
+ * @np:		device node from which the property value is to be read.
+ * @propname:	name of the property to be searched.
+ * @out_values:	pointer to return value, modified only if return value is 0.
+ * @sz:		number of array elements to read
+ *
+ * Search for a property in a device node and read 16-bit value(s) from
+ * it. Returns 0 on success, -EINVAL if the property does not exist,
+ * -ENODATA if property does not have a value, and -EOVERFLOW if the
+ * property data isn't large enough.
+ *
+ * dts entry of array should be like:
+ *	property = /bits/ 16 <0x5000 0x6000 0x7000>;
+ *
+ * The out_values is modified only if a valid u16 value can be decoded.
+ */
+static inline int of_property_read_u16_array(const struct device_node *np,
+					     const char *propname,
+					     u16 *out_values, size_t sz)
+{
+	int ret = of_property_read_variable_u16_array(np, propname, out_values,
+						      sz, 0);
+	if (ret >= 0)
+		return 0;
+	else
+		return ret;
+}
+
+/**
+ * of_property_read_u32_array - Find and read an array of 32 bit integers
+ * from a property.
+ *
+ * @np:		device node from which the property value is to be read.
+ * @propname:	name of the property to be searched.
+ * @out_values:	pointer to return value, modified only if return value is 0.
+ * @sz:		number of array elements to read
+ *
+ * Search for a property in a device node and read 32-bit value(s) from
+ * it. Returns 0 on success, -EINVAL if the property does not exist,
+ * -ENODATA if property does not have a value, and -EOVERFLOW if the
+ * property data isn't large enough.
+ *
+ * The out_values is modified only if a valid u32 value can be decoded.
+ */
+static inline int of_property_read_u32_array(const struct device_node *np,
+					     const char *propname,
+					     u32 *out_values, size_t sz)
+{
+	int ret = of_property_read_variable_u32_array(np, propname, out_values,
+						      sz, 0);
+	if (ret >= 0)
+		return 0;
+	else
+		return ret;
+}
+
+/**
+ * of_property_read_u64_array - Find and read an array of 64 bit integers
+ * from a property.
+ *
+ * @np:		device node from which the property value is to be read.
+ * @propname:	name of the property to be searched.
+ * @out_values:	pointer to return value, modified only if return value is 0.
+ * @sz:		number of array elements to read
+ *
+ * Search for a property in a device node and read 64-bit value(s) from
+ * it. Returns 0 on success, -EINVAL if the property does not exist,
+ * -ENODATA if property does not have a value, and -EOVERFLOW if the
+ * property data isn't large enough.
+ *
+ * The out_values is modified only if a valid u64 value can be decoded.
+ */
+static inline int of_property_read_u64_array(const struct device_node *np,
+					     const char *propname,
+					     u64 *out_values, size_t sz)
+{
+	int ret = of_property_read_variable_u64_array(np, propname, out_values,
+						      sz, 0);
+	if (ret >= 0)
+		return 0;
+	else
+		return ret;
+}
+
 /*
  * struct property *prop;
  * const __be32 *p;
@@ -401,18 +543,20 @@ const char *of_prop_next_string(struct property *prop, const char *cur);
 
 bool of_console_check(struct device_node *dn, char *name, int index);
 
+extern int of_cpu_node_to_id(struct device_node *np);
+
 #else /* CONFIG_OF */
 
 static inline void of_core_init(void)
 {
 }
 
-static inline bool is_of_node(struct fwnode_handle *fwnode)
+static inline bool is_of_node(const struct fwnode_handle *fwnode)
 {
 	return false;
 }
 
-static inline struct device_node *to_of_node(struct fwnode_handle *fwnode)
+static inline struct device_node *to_of_node(const struct fwnode_handle *fwnode)
 {
 	return NULL;
 }
@@ -481,6 +625,8 @@ static inline struct device_node *of_find_node_with_property(
 	return NULL;
 }
 
+#define of_fwnode_handle(node) NULL
+
 static inline bool of_have_populated_dt(void)
 {
 	return false;
@@ -495,6 +641,12 @@ static inline struct device_node *of_get_child_by_name(
 
 static inline int of_device_is_compatible(const struct device_node *device,
 					  const char *name)
+{
+	return 0;
+}
+
+static inline  int of_device_compatible_match(struct device_node *device,
+					      const char *const *compat)
 {
 	return 0;
 }
@@ -530,12 +682,6 @@ static inline int of_property_count_elems_of_size(const struct device_node *np,
 	return -ENOSYS;
 }
 
-static inline int of_property_read_u32_index(const struct device_node *np,
-			const char *propname, u32 index, u32 *out_value)
-{
-	return -ENOSYS;
-}
-
 static inline int of_property_read_u8_array(const struct device_node *np,
 			const char *propname, u8 *out_values, size_t sz)
 {
@@ -562,16 +708,14 @@ static inline int of_property_read_u64_array(const struct device_node *np,
 	return -ENOSYS;
 }
 
-static inline int of_property_read_string(const struct device_node *np,
-					  const char *propname,
-					  const char **out_string)
+static inline int of_property_read_u32_index(const struct device_node *np,
+			const char *propname, u32 index, u32 *out_value)
 {
 	return -ENOSYS;
 }
 
-static inline int of_property_read_string_helper(const struct device_node *np,
-						 const char *propname,
-						 const char **out_strs, size_t sz, int index)
+static inline int of_property_read_u64_index(const struct device_node *np,
+			const char *propname, u32 index, u64 *out_value)
 {
 	return -ENOSYS;
 }
@@ -589,8 +733,57 @@ static inline struct device_node *of_get_cpu_node(int cpu,
 	return NULL;
 }
 
+static inline int of_n_addr_cells(struct device_node *np)
+{
+	return 0;
+
+}
+static inline int of_n_size_cells(struct device_node *np)
+{
+	return 0;
+}
+
+static inline int of_property_read_variable_u8_array(const struct device_node *np,
+					const char *propname, u8 *out_values,
+					size_t sz_min, size_t sz_max)
+{
+	return -ENOSYS;
+}
+
+static inline int of_property_read_variable_u16_array(const struct device_node *np,
+					const char *propname, u16 *out_values,
+					size_t sz_min, size_t sz_max)
+{
+	return -ENOSYS;
+}
+
+static inline int of_property_read_variable_u32_array(const struct device_node *np,
+					const char *propname,
+					u32 *out_values,
+					size_t sz_min,
+					size_t sz_max)
+{
+	return -ENOSYS;
+}
+
 static inline int of_property_read_u64(const struct device_node *np,
 				       const char *propname, u64 *out_value)
+{
+	return -ENOSYS;
+}
+
+static inline int of_property_read_variable_u64_array(const struct device_node *np,
+					const char *propname,
+					u64 *out_values,
+					size_t sz_min,
+					size_t sz_max)
+{
+	return -ENOSYS;
+}
+
+static inline int of_property_read_string(const struct device_node *np,
+					  const char *propname,
+					  const char **out_string)
 {
 	return -ENOSYS;
 }
@@ -598,6 +791,13 @@ static inline int of_property_read_u64(const struct device_node *np,
 static inline int of_property_match_string(const struct device_node *np,
 					   const char *propname,
 					   const char *string)
+{
+	return -ENOSYS;
+}
+
+static inline int of_property_read_string_helper(const struct device_node *np,
+						 const char *propname,
+						 const char **out_strs, size_t sz, int index)
 {
 	return -ENOSYS;
 }
@@ -614,6 +814,15 @@ static inline int of_parse_phandle_with_args(const struct device_node *np,
 					     const char *cells_name,
 					     int index,
 					     struct of_phandle_args *out_args)
+{
+	return -ENOSYS;
+}
+
+static inline int of_parse_phandle_with_args_map(const struct device_node *np,
+						 const char *list_name,
+						 const char *stem_name,
+						 int index,
+						 struct of_phandle_args *out_args)
 {
 	return -ENOSYS;
 }
@@ -715,6 +924,11 @@ static inline void of_property_set_flag(struct property *p, unsigned long flag)
 
 static inline void of_property_clear_flag(struct property *p, unsigned long flag)
 {
+}
+
+static inline int of_cpu_node_to_id(struct device_node *np)
+{
+	return -ENODEV;
 }
 
 #define of_match_ptr(_ptr)	NULL
@@ -1128,9 +1342,6 @@ static inline int of_reconfig_get_state_change(unsigned long action,
 }
 #endif /* CONFIG_OF_DYNAMIC */
 
-/* CONFIG_OF_RESOLVE api */
-extern int of_resolve_phandles(struct device_node *tree);
-
 /**
  * of_device_is_system_power_controller - Tells if system-power-controller is found for device_node
  * @np: Pointer to the given device_node
@@ -1146,28 +1357,53 @@ static inline bool of_device_is_system_power_controller(const struct device_node
  * Overlay support
  */
 
+enum of_overlay_notify_action {
+	OF_OVERLAY_PRE_APPLY = 0,
+	OF_OVERLAY_POST_APPLY,
+	OF_OVERLAY_PRE_REMOVE,
+	OF_OVERLAY_POST_REMOVE,
+};
+
+struct of_overlay_notify_data {
+	struct device_node *overlay;
+	struct device_node *target;
+};
+
 #ifdef CONFIG_OF_OVERLAY
 
-/* ID based overlays; the API for external users */
-int of_overlay_create(struct device_node *tree);
-int of_overlay_destroy(int id);
-int of_overlay_destroy_all(void);
+int of_overlay_fdt_apply(const void *overlay_fdt, u32 overlay_fdt_size,
+			 int *ovcs_id);
+int of_overlay_remove(int *ovcs_id);
+int of_overlay_remove_all(void);
+
+int of_overlay_notifier_register(struct notifier_block *nb);
+int of_overlay_notifier_unregister(struct notifier_block *nb);
 
 #else
 
-static inline int of_overlay_create(struct device_node *tree)
+static inline int of_overlay_fdt_apply(void *overlay_fdt, int *ovcs_id)
 {
 	return -ENOTSUPP;
 }
 
-static inline int of_overlay_destroy(int id)
+static inline int of_overlay_remove(int *ovcs_id)
 {
 	return -ENOTSUPP;
 }
 
-static inline int of_overlay_destroy_all(void)
+static inline int of_overlay_remove_all(void)
 {
 	return -ENOTSUPP;
+}
+
+static inline int of_overlay_notifier_register(struct notifier_block *nb)
+{
+	return 0;
+}
+
+static inline int of_overlay_notifier_unregister(struct notifier_block *nb)
+{
+	return 0;
 }
 
 #endif

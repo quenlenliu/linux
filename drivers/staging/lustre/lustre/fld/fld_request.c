@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -38,71 +39,20 @@
 
 #define DEBUG_SUBSYSTEM S_FLD
 
-#include "../../include/linux/libcfs/libcfs.h"
+#include <linux/libcfs/libcfs.h>
 #include <linux/module.h>
 #include <asm/div64.h>
 
-#include "../include/obd.h"
-#include "../include/obd_class.h"
-#include "../include/lustre_ver.h"
-#include "../include/obd_support.h"
-#include "../include/lprocfs_status.h"
+#include <obd.h>
+#include <obd_class.h>
+#include <uapi/linux/lustre/lustre_ver.h>
+#include <obd_support.h>
+#include <lprocfs_status.h>
 
-#include "../include/lustre_req_layout.h"
-#include "../include/lustre_fld.h"
-#include "../include/lustre_mdc.h"
+#include <lustre_req_layout.h>
+#include <lustre_fld.h>
+#include <lustre_mdc.h>
 #include "fld_internal.h"
-
-/* TODO: these 3 functions are copies of flow-control code from mdc_lib.c
- * It should be common thing. The same about mdc RPC lock
- */
-static int fld_req_avail(struct client_obd *cli, struct mdc_cache_waiter *mcw)
-{
-	int rc;
-
-	spin_lock(&cli->cl_loi_list_lock);
-	rc = list_empty(&mcw->mcw_entry);
-	spin_unlock(&cli->cl_loi_list_lock);
-	return rc;
-};
-
-static void fld_enter_request(struct client_obd *cli)
-{
-	struct mdc_cache_waiter mcw;
-	struct l_wait_info lwi = { 0 };
-
-	spin_lock(&cli->cl_loi_list_lock);
-	if (cli->cl_r_in_flight >= cli->cl_max_rpcs_in_flight) {
-		list_add_tail(&mcw.mcw_entry, &cli->cl_cache_waiters);
-		init_waitqueue_head(&mcw.mcw_waitq);
-		spin_unlock(&cli->cl_loi_list_lock);
-		l_wait_event(mcw.mcw_waitq, fld_req_avail(cli, &mcw), &lwi);
-	} else {
-		cli->cl_r_in_flight++;
-		spin_unlock(&cli->cl_loi_list_lock);
-	}
-}
-
-static void fld_exit_request(struct client_obd *cli)
-{
-	struct list_head *l, *tmp;
-	struct mdc_cache_waiter *mcw;
-
-	spin_lock(&cli->cl_loi_list_lock);
-	cli->cl_r_in_flight--;
-	list_for_each_safe(l, tmp, &cli->cl_cache_waiters) {
-		if (cli->cl_r_in_flight >= cli->cl_max_rpcs_in_flight) {
-			/* No free request slots anymore */
-			break;
-		}
-
-		mcw = list_entry(l, struct mdc_cache_waiter, mcw_entry);
-		list_del_init(&mcw->mcw_entry);
-		cli->cl_r_in_flight++;
-		wake_up(&mcw->mcw_waitq);
-	}
-	spin_unlock(&cli->cl_loi_list_lock);
-}
 
 static int fld_rrb_hash(struct lu_client_fld *fld, u64 seq)
 {
@@ -210,11 +160,6 @@ int fld_client_add_target(struct lu_client_fld *fld,
 	LASSERT(name);
 	LASSERT(tar->ft_srv || tar->ft_exp);
 
-	if (fld->lcf_flags != LUSTRE_FLD_INIT) {
-		CERROR("%s: Attempt to add target %s (idx %llu) on fly - skip it\n",
-		       fld->lcf_name, name, tar->ft_idx);
-		return 0;
-	}
 	CDEBUG(D_INFO, "%s: Adding target %s (idx %llu)\n",
 	       fld->lcf_name, name, tar->ft_idx);
 
@@ -270,7 +215,6 @@ int fld_client_del_target(struct lu_client_fld *fld, __u64 idx)
 	spin_unlock(&fld->lcf_lock);
 	return -ENOENT;
 }
-EXPORT_SYMBOL(fld_client_del_target);
 
 static struct dentry *fld_debugfs_dir;
 
@@ -334,7 +278,6 @@ int fld_client_init(struct lu_client_fld *fld,
 	fld->lcf_count = 0;
 	spin_lock_init(&fld->lcf_lock);
 	fld->lcf_hash = &fld_hash[hash];
-	fld->lcf_flags = LUSTRE_FLD_INIT;
 	INIT_LIST_HEAD(&fld->lcf_targets);
 
 	cache_size = FLD_CLIENT_CACHE_SIZE /
@@ -439,9 +382,9 @@ int fld_client_rpc(struct obd_export *exp,
 	req->rq_reply_portal = MDC_REPLY_PORTAL;
 	ptlrpc_at_set_req_timeout(req);
 
-	fld_enter_request(&exp->exp_obd->u.cli);
+	obd_get_request_slot(&exp->exp_obd->u.cli);
 	rc = ptlrpc_queue_wait(req);
-	fld_exit_request(&exp->exp_obd->u.cli);
+	obd_put_request_slot(&exp->exp_obd->u.cli);
 	if (rc)
 		goto out_req;
 
@@ -473,8 +416,6 @@ int fld_client_lookup(struct lu_client_fld *fld, u64 seq, u32 *mds,
 	struct lu_fld_target *target;
 	int rc;
 
-	fld->lcf_flags |= LUSTRE_FLD_RUN;
-
 	rc = fld_cache_lookup(fld->lcf_cache, seq, &res);
 	if (rc == 0) {
 		*mds = res.lsr_index;
@@ -485,7 +426,8 @@ int fld_client_lookup(struct lu_client_fld *fld, u64 seq, u32 *mds,
 	target = fld_client_get_target(fld, seq);
 	LASSERT(target);
 
-	CDEBUG(D_INFO, "%s: Lookup fld entry (seq: %#llx) on target %s (idx %llu)\n",
+	CDEBUG(D_INFO,
+	       "%s: Lookup fld entry (seq: %#llx) on target %s (idx %llu)\n",
 	       fld->lcf_name, seq, fld_target_name(target), target->ft_idx);
 
 	res.lsr_start = seq;
@@ -505,7 +447,6 @@ void fld_client_flush(struct lu_client_fld *fld)
 {
 	fld_cache_flush(fld->lcf_cache);
 }
-EXPORT_SYMBOL(fld_client_flush);
 
 static int __init fld_init(void)
 {

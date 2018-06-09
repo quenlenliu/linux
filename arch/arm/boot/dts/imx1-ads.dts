@@ -20,7 +20,7 @@
 		stdout-path = &uart1;
 	};
 
-	memory {
+	memory@8000000 {
 		reg = <0x08000000 0x04000000>;
 	};
 
@@ -38,7 +38,6 @@
 
 &cspi1 {
 	pinctrl-0 = <&pinctrl_cspi1>;
-	fsl,spi-num-chipselects = <1>;
 	cs-gpios = <&gpio3 15 GPIO_ACTIVE_LOW>;
 	status = "okay";
 };

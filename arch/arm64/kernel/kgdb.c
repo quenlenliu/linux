@@ -19,10 +19,15 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <linux/bug.h>
 #include <linux/irq.h>
 #include <linux/kdebug.h>
 #include <linux/kgdb.h>
 #include <linux/kprobes.h>
+#include <linux/sched/task_stack.h>
+
+#include <asm/debug-monitors.h>
+#include <asm/insn.h>
 #include <asm/traps.h>
 
 struct dbg_reg_def_t dbg_reg_def[DBG_MAX_REG_NUM] = {
@@ -133,14 +138,25 @@ int dbg_set_reg(int regno, void *mem, struct pt_regs *regs)
 void
 sleeping_thread_to_gdb_regs(unsigned long *gdb_regs, struct task_struct *task)
 {
-	struct pt_regs *thread_regs;
+	struct cpu_context *cpu_context = &task->thread.cpu_context;
 
 	/* Initialize to zero */
 	memset((char *)gdb_regs, 0, NUMREGBYTES);
-	thread_regs = task_pt_regs(task);
-	memcpy((void *)gdb_regs, (void *)thread_regs->regs, GP_REG_BYTES);
-	/* Special case for PSTATE (check comments in asm/kgdb.h for details) */
-	dbg_get_reg(33, gdb_regs + GP_REG_BYTES, thread_regs);
+
+	gdb_regs[19] = cpu_context->x19;
+	gdb_regs[20] = cpu_context->x20;
+	gdb_regs[21] = cpu_context->x21;
+	gdb_regs[22] = cpu_context->x22;
+	gdb_regs[23] = cpu_context->x23;
+	gdb_regs[24] = cpu_context->x24;
+	gdb_regs[25] = cpu_context->x25;
+	gdb_regs[26] = cpu_context->x26;
+	gdb_regs[27] = cpu_context->x27;
+	gdb_regs[28] = cpu_context->x28;
+	gdb_regs[29] = cpu_context->fp;
+
+	gdb_regs[31] = cpu_context->sp;
+	gdb_regs[32] = cpu_context->pc;
 }
 
 void kgdb_arch_set_pc(struct pt_regs *regs, unsigned long pc)
@@ -244,6 +260,9 @@ NOKPROBE_SYMBOL(kgdb_compiled_brk_fn);
 
 static int kgdb_step_brk_fn(struct pt_regs *regs, unsigned int esr)
 {
+	if (!kgdb_single_step)
+		return DBG_HOOK_ERROR;
+
 	kgdb_handle_exception(1, SIGTRAP, 0, regs);
 	return 0;
 }
@@ -338,15 +357,24 @@ void kgdb_arch_exit(void)
 	unregister_die_notifier(&kgdb_notifier);
 }
 
-/*
- * ARM instructions are always in LE.
- * Break instruction is encoded in LE format
- */
-struct kgdb_arch arch_kgdb_ops = {
-	.gdb_bpt_instr = {
-		KGDB_DYN_BRK_INS_BYTE(0),
-		KGDB_DYN_BRK_INS_BYTE(1),
-		KGDB_DYN_BRK_INS_BYTE(2),
-		KGDB_DYN_BRK_INS_BYTE(3),
-	}
-};
+struct kgdb_arch arch_kgdb_ops;
+
+int kgdb_arch_set_breakpoint(struct kgdb_bkpt *bpt)
+{
+	int err;
+
+	BUILD_BUG_ON(AARCH64_INSN_SIZE != BREAK_INSTR_SIZE);
+
+	err = aarch64_insn_read((void *)bpt->bpt_addr, (u32 *)bpt->saved_instr);
+	if (err)
+		return err;
+
+	return aarch64_insn_write((void *)bpt->bpt_addr,
+			(u32)AARCH64_BREAK_KGDB_DYN_DBG);
+}
+
+int kgdb_arch_remove_breakpoint(struct kgdb_bkpt *bpt)
+{
+	return aarch64_insn_write((void *)bpt->bpt_addr,
+			*(u32 *)bpt->saved_instr);
+}

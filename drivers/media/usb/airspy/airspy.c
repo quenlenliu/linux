@@ -426,7 +426,6 @@ static int airspy_alloc_urbs(struct airspy *s)
 		dev_dbg(s->dev, "alloc urb=%d\n", i);
 		s->urb_list[i] = usb_alloc_urb(0, GFP_ATOMIC);
 		if (!s->urb_list[i]) {
-			dev_dbg(s->dev, "failed\n");
 			for (j = 0; j < i; j++)
 				usb_free_urb(s->urb_list[j]);
 			return -ENOMEM;
@@ -606,7 +605,7 @@ static void airspy_stop_streaming(struct vb2_queue *vq)
 	mutex_unlock(&s->v4l2_lock);
 }
 
-static struct vb2_ops airspy_vb2_ops = {
+static const struct vb2_ops airspy_vb2_ops = {
 	.queue_setup            = airspy_queue_setup,
 	.buf_queue              = airspy_buf_queue,
 	.start_streaming        = airspy_start_streaming,
@@ -860,7 +859,7 @@ static const struct v4l2_file_operations airspy_fops = {
 	.unlocked_ioctl           = video_ioctl2,
 };
 
-static struct video_device airspy_template = {
+static const struct video_device airspy_template = {
 	.name                     = "AirSpy SDR",
 	.release                  = video_device_release_empty,
 	.fops                     = &airspy_fops,
@@ -1088,7 +1087,7 @@ err_free_mem:
 }
 
 /* USB device ID list */
-static struct usb_device_id airspy_id_table[] = {
+static const struct usb_device_id airspy_id_table[] = {
 	{ USB_DEVICE(0x1d50, 0x60a1) }, /* AirSpy */
 	{ }
 };

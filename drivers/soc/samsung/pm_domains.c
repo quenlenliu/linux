@@ -1,17 +1,13 @@
-/*
- * Exynos Generic power domain support.
- *
- * Copyright (c) 2012 Samsung Electronics Co., Ltd.
- *		http://www.samsung.com
- *
- * Implementation of Exynos specific power domain control which is used in
- * conjunction with runtime-pm. Support for both device-tree and non-device-tree
- * based power domain support is included.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
-*/
+// SPDX-License-Identifier: GPL-2.0
+//
+// Exynos Generic power domain support.
+//
+// Copyright (c) 2012 Samsung Electronics Co., Ltd.
+//		http://www.samsung.com
+//
+// Implementation of Exynos specific power domain control which is used in
+// conjunction with runtime-pm. Support for both device-tree and non-device-tree
+// based power domain support is included.
 
 #include <linux/io.h>
 #include <linux/err.h>
@@ -35,7 +31,6 @@ struct exynos_pm_domain_config {
  */
 struct exynos_pm_domain {
 	void __iomem *base;
-	char const *name;
 	bool is_off;
 	struct generic_pm_domain pd;
 	struct clk *oscclk;
@@ -70,7 +65,7 @@ static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 			pd->pclk[i] = clk_get_parent(pd->clk[i]);
 			if (clk_set_parent(pd->clk[i], pd->oscclk))
 				pr_err("%s: error setting oscclk as parent to clock %d\n",
-						pd->name, i);
+						domain->name, i);
 		}
 	}
 
@@ -101,7 +96,7 @@ static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 				continue; /* Skip on first power up */
 			if (clk_set_parent(pd->clk[i], pd->pclk[i]))
 				pr_err("%s: error setting parent to clock%d\n",
-						pd->name, i);
+						domain->name, i);
 		}
 	}
 
@@ -128,12 +123,34 @@ static const struct exynos_pm_domain_config exynos4210_cfg __initconst = {
 	.local_pwr_cfg		= 0x7,
 };
 
+static const struct exynos_pm_domain_config exynos5433_cfg __initconst = {
+	.local_pwr_cfg		= 0xf,
+};
+
 static const struct of_device_id exynos_pm_domain_of_match[] __initconst = {
 	{
 		.compatible = "samsung,exynos4210-pd",
 		.data = &exynos4210_cfg,
+	}, {
+		.compatible = "samsung,exynos5433-pd",
+		.data = &exynos5433_cfg,
 	},
 	{ },
+};
+
+static __init const char *exynos_get_domain_name(struct device_node *node)
+{
+	const char *name;
+
+	if (of_property_read_string(node, "label", &name) < 0)
+		name = kbasename(node->full_name);
+	return kstrdup_const(name, GFP_KERNEL);
+}
+
+static const char *soc_force_no_clk[] = {
+	"samsung,exynos5250-clock",
+	"samsung,exynos5420-clock",
+	"samsung,exynos5800-clock",
 };
 
 static __init int exynos4_pm_init_power_domain(void)
@@ -150,20 +167,16 @@ static __init int exynos4_pm_init_power_domain(void)
 
 		pd = kzalloc(sizeof(*pd), GFP_KERNEL);
 		if (!pd) {
-			pr_err("%s: failed to allocate memory for domain\n",
-					__func__);
 			of_node_put(np);
 			return -ENOMEM;
 		}
-		pd->pd.name = kstrdup_const(strrchr(np->full_name, '/') + 1,
-					    GFP_KERNEL);
+		pd->pd.name = exynos_get_domain_name(np);
 		if (!pd->pd.name) {
 			kfree(pd);
 			of_node_put(np);
 			return -ENOMEM;
 		}
 
-		pd->name = pd->pd.name;
 		pd->base = of_iomap(np, 0);
 		if (!pd->base) {
 			pr_warn("%s: failed to map memory\n", __func__);
@@ -175,6 +188,11 @@ static __init int exynos4_pm_init_power_domain(void)
 		pd->pd.power_off = exynos_pd_power_off;
 		pd->pd.power_on = exynos_pd_power_on;
 		pd->local_pwr_cfg = pm_domain_cfg->local_pwr_cfg;
+
+		for (i = 0; i < ARRAY_SIZE(soc_force_no_clk); i++)
+			if (of_find_compatible_node(NULL, NULL,
+						    soc_force_no_clk[i]))
+				goto no_clk;
 
 		for (i = 0; i < MAX_CLK_PER_DOMAIN; i++) {
 			char clk_name[8];
@@ -215,29 +233,22 @@ no_clk:
 
 	/* Assign the child power domains to their parents */
 	for_each_matching_node(np, exynos_pm_domain_of_match) {
-		struct generic_pm_domain *child_domain, *parent_domain;
-		struct of_phandle_args args;
+		struct of_phandle_args child, parent;
 
-		args.np = np;
-		args.args_count = 0;
-		child_domain = of_genpd_get_from_provider(&args);
-		if (IS_ERR(child_domain))
-			continue;
+		child.np = np;
+		child.args_count = 0;
 
 		if (of_parse_phandle_with_args(np, "power-domains",
-					 "#power-domain-cells", 0, &args) != 0)
+					       "#power-domain-cells", 0,
+					       &parent) != 0)
 			continue;
 
-		parent_domain = of_genpd_get_from_provider(&args);
-		if (IS_ERR(parent_domain))
-			continue;
-
-		if (pm_genpd_add_subdomain(parent_domain, child_domain))
-			pr_warn("%s failed to add subdomain: %s\n",
-				parent_domain->name, child_domain->name);
+		if (of_genpd_add_subdomain(&parent, &child))
+			pr_warn("%pOF failed to add subdomain: %pOF\n",
+				parent.np, child.np);
 		else
-			pr_info("%s has as child subdomain: %s.\n",
-				parent_domain->name, child_domain->name);
+			pr_info("%pOF has as child subdomain: %pOF.\n",
+				parent.np, child.np);
 	}
 
 	return 0;

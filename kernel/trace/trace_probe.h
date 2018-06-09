@@ -42,7 +42,6 @@
 
 #define MAX_TRACE_ARGS		128
 #define MAX_ARGSTR_LEN		63
-#define MAX_EVENT_NAME_LEN	64
 #define MAX_STRING_SIZE		PATH_MAX
 
 /* Reserved field names */
@@ -149,6 +148,11 @@ DECLARE_BASIC_PRINT_TYPE_FUNC(s8);
 DECLARE_BASIC_PRINT_TYPE_FUNC(s16);
 DECLARE_BASIC_PRINT_TYPE_FUNC(s32);
 DECLARE_BASIC_PRINT_TYPE_FUNC(s64);
+DECLARE_BASIC_PRINT_TYPE_FUNC(x8);
+DECLARE_BASIC_PRINT_TYPE_FUNC(x16);
+DECLARE_BASIC_PRINT_TYPE_FUNC(x32);
+DECLARE_BASIC_PRINT_TYPE_FUNC(x64);
+
 DECLARE_BASIC_PRINT_TYPE_FUNC(string);
 
 #define FETCH_FUNC_NAME(method, type)	fetch_##method##_##type
@@ -203,7 +207,7 @@ DEFINE_FETCH_##method(u32)		\
 DEFINE_FETCH_##method(u64)
 
 /* Default (unsigned long) fetch type */
-#define __DEFAULT_FETCH_TYPE(t) u##t
+#define __DEFAULT_FETCH_TYPE(t) x##t
 #define _DEFAULT_FETCH_TYPE(t) __DEFAULT_FETCH_TYPE(t)
 #define DEFAULT_FETCH_TYPE _DEFAULT_FETCH_TYPE(BITS_PER_LONG)
 #define DEFAULT_FETCH_TYPE_STR __stringify(DEFAULT_FETCH_TYPE)
@@ -234,16 +238,22 @@ ASSIGN_FETCH_FUNC(file_offset, ftype),			\
 #define ASSIGN_FETCH_TYPE(ptype, ftype, sign)			\
 	__ASSIGN_FETCH_TYPE(#ptype, ptype, ftype, sizeof(ftype), sign, #ptype)
 
+/* If ptype is an alias of atype, use this macro (show atype in format) */
+#define ASSIGN_FETCH_TYPE_ALIAS(ptype, atype, ftype, sign)		\
+	__ASSIGN_FETCH_TYPE(#ptype, ptype, ftype, sizeof(ftype), sign, #atype)
+
 #define ASSIGN_FETCH_TYPE_END {}
 
 #define FETCH_TYPE_STRING	0
 #define FETCH_TYPE_STRSIZE	1
 
-#ifdef CONFIG_KPROBE_EVENT
+#ifdef CONFIG_KPROBE_EVENTS
 struct symbol_cache;
 unsigned long update_symbol_cache(struct symbol_cache *sc);
 void free_symbol_cache(struct symbol_cache *sc);
 struct symbol_cache *alloc_symbol_cache(const char *sym, long offset);
+bool trace_kprobe_on_func_entry(struct trace_event_call *call);
+bool trace_kprobe_error_injectable(struct trace_event_call *call);
 #else
 /* uprobes do not support symbol fetch methods */
 #define fetch_symbol_u8			NULL
@@ -269,7 +279,17 @@ alloc_symbol_cache(const char *sym, long offset)
 {
 	return NULL;
 }
-#endif /* CONFIG_KPROBE_EVENT */
+
+static inline bool trace_kprobe_on_func_entry(struct trace_event_call *call)
+{
+	return false;
+}
+
+static inline bool trace_kprobe_error_injectable(struct trace_event_call *call)
+{
+	return false;
+}
+#endif /* CONFIG_KPROBE_EVENTS */
 
 struct probe_arg {
 	struct fetch_param	fetch;
@@ -345,13 +365,7 @@ extern int traceprobe_conflict_field_name(const char *name,
 extern void traceprobe_update_arg(struct probe_arg *arg);
 extern void traceprobe_free_probe_arg(struct probe_arg *arg);
 
-extern int traceprobe_split_symbol_offset(char *symbol, unsigned long *offset);
-
-extern ssize_t traceprobe_probes_write(struct file *file,
-		const char __user *buffer, size_t count, loff_t *ppos,
-		int (*createfn)(int, char**));
-
-extern int traceprobe_command(const char *buf, int (*createfn)(int, char**));
+extern int traceprobe_split_symbol_offset(char *symbol, long *offset);
 
 /* Sum up total data length for dynamic arraies (strings) */
 static nokprobe_inline int
@@ -402,3 +416,14 @@ store_trace_args(int ent_size, struct trace_probe *tp, struct pt_regs *regs,
 }
 
 extern int set_print_fmt(struct trace_probe *tp, bool is_return);
+
+#ifdef CONFIG_PERF_EVENTS
+extern struct trace_event_call *
+create_local_trace_kprobe(char *func, void *addr, unsigned long offs,
+			  bool is_return);
+extern void destroy_local_trace_kprobe(struct trace_event_call *event_call);
+
+extern struct trace_event_call *
+create_local_trace_uprobe(char *name, unsigned long offs, bool is_return);
+extern void destroy_local_trace_uprobe(struct trace_event_call *event_call);
+#endif

@@ -23,7 +23,7 @@
 #include <linux/dvb/frontend.h>
 #include <linux/types.h>
 #include "helene.h"
-#include "dvb_frontend.h"
+#include <media/dvb_frontend.h>
 
 #define MAX_WRITE_REGSIZE 20
 
@@ -309,7 +309,7 @@ static int helene_write_regs(struct helene_priv *priv,
 
 	if (len + 1 > sizeof(buf)) {
 		dev_warn(&priv->i2c->dev,
-				"wr reg=%04x: len=%d vs %Zu is too big!\n",
+				"wr reg=%04x: len=%d vs %zu is too big!\n",
 				reg, len + 1, sizeof(buf));
 		return -E2BIG;
 	}
@@ -331,7 +331,9 @@ static int helene_write_regs(struct helene_priv *priv,
 
 static int helene_write_reg(struct helene_priv *priv, u8 reg, u8 val)
 {
-	return helene_write_regs(priv, reg, &val, 1);
+	u8 tmp = val; /* see gcc.gnu.org/bugzilla/show_bug.cgi?id=81715 */
+
+	return helene_write_regs(priv, reg, &tmp, 1);
 }
 
 static int helene_read_regs(struct helene_priv *priv,
@@ -434,14 +436,13 @@ static int helene_init(struct dvb_frontend *fe)
 	return helene_leave_power_save(priv);
 }
 
-static int helene_release(struct dvb_frontend *fe)
+static void helene_release(struct dvb_frontend *fe)
 {
 	struct helene_priv *priv = fe->tuner_priv;
 
 	dev_dbg(&priv->i2c->dev, "%s()\n", __func__);
 	kfree(fe->tuner_priv);
 	fe->tuner_priv = NULL;
-	return 0;
 }
 
 static int helene_sleep(struct dvb_frontend *fe)
@@ -842,7 +843,7 @@ static int helene_get_frequency(struct dvb_frontend *fe, u32 *frequency)
 	return 0;
 }
 
-static struct dvb_tuner_ops helene_tuner_ops = {
+static const struct dvb_tuner_ops helene_tuner_ops = {
 	.info = {
 		.name = "Sony HELENE Ter tuner",
 		.frequency_min = 1000000,
@@ -856,7 +857,7 @@ static struct dvb_tuner_ops helene_tuner_ops = {
 	.get_frequency = helene_get_frequency,
 };
 
-static struct dvb_tuner_ops helene_tuner_ops_s = {
+static const struct dvb_tuner_ops helene_tuner_ops_s = {
 	.info = {
 		.name = "Sony HELENE Sat tuner",
 		.frequency_min = 500000,
@@ -987,8 +988,10 @@ struct dvb_frontend *helene_attach_s(struct dvb_frontend *fe,
 	if (fe->ops.i2c_gate_ctrl)
 		fe->ops.i2c_gate_ctrl(fe, 1);
 
-	if (helene_x_pon(priv) != 0)
+	if (helene_x_pon(priv) != 0) {
+		kfree(priv);
 		return NULL;
+	}
 
 	if (fe->ops.i2c_gate_ctrl)
 		fe->ops.i2c_gate_ctrl(fe, 0);
@@ -1021,8 +1024,10 @@ struct dvb_frontend *helene_attach(struct dvb_frontend *fe,
 	if (fe->ops.i2c_gate_ctrl)
 		fe->ops.i2c_gate_ctrl(fe, 1);
 
-	if (helene_x_pon(priv) != 0)
+	if (helene_x_pon(priv) != 0) {
+		kfree(priv);
 		return NULL;
+	}
 
 	if (fe->ops.i2c_gate_ctrl)
 		fe->ops.i2c_gate_ctrl(fe, 0);

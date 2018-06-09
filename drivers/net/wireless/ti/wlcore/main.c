@@ -42,6 +42,7 @@
 #include "sysfs.h"
 
 #define WL1271_BOOT_RETRIES 3
+#define WL1271_SUSPEND_SLEEP 100
 
 static char *fwlog_param;
 static int fwlog_mem_blocks = -1;
@@ -196,9 +197,9 @@ out:
 	mutex_unlock(&wl->mutex);
 }
 
-static void wl1271_rx_streaming_timer(unsigned long data)
+static void wl1271_rx_streaming_timer(struct timer_list *t)
 {
-	struct wl12xx_vif *wlvif = (struct wl12xx_vif *)data;
+	struct wl12xx_vif *wlvif = from_timer(wlvif, t, rx_streaming_timer);
 	struct wl1271 *wl = wlvif->wl;
 	ieee80211_queue_work(wl->hw, &wlvif->rx_streaming_disable_work);
 }
@@ -388,7 +389,6 @@ static void wl12xx_irq_update_links_status(struct wl1271 *wl,
 static int wlcore_fw_status(struct wl1271 *wl, struct wl_fw_status *status)
 {
 	struct wl12xx_vif *wlvif;
-	struct timespec ts;
 	u32 old_tx_blk_count = wl->tx_blocks_available;
 	int avail, freed_blocks;
 	int i;
@@ -485,8 +485,7 @@ static int wlcore_fw_status(struct wl1271 *wl, struct wl_fw_status *status)
 	}
 
 	/* update the host-chipset time offset */
-	getnstimeofday(&ts);
-	wl->time_offset = (timespec_to_ns(&ts) >> 10) -
+	wl->time_offset = (ktime_get_boot_ns() >> 10) -
 		(s64)(status->fw_localtime);
 
 	wl->fw_fast_lnk_map = status->link_fast_bitmap;
@@ -979,6 +978,24 @@ static int wlcore_fw_wakeup(struct wl1271 *wl)
 	return wlcore_raw_write32(wl, HW_ACCESS_ELP_CTRL_REG, ELPCTRL_WAKE_UP);
 }
 
+static int wlcore_fw_sleep(struct wl1271 *wl)
+{
+	int ret;
+
+	mutex_lock(&wl->mutex);
+	ret = wlcore_raw_write32(wl, HW_ACCESS_ELP_CTRL_REG, ELPCTRL_SLEEP);
+	if (ret < 0) {
+		wl12xx_queue_recovery_work(wl);
+		goto out;
+	}
+	set_bit(WL1271_FLAG_IN_ELP, &wl->flags);
+out:
+	mutex_unlock(&wl->mutex);
+	mdelay(WL1271_SUSPEND_SLEEP);
+
+	return 0;
+}
+
 static int wl1271_setup(struct wl1271 *wl)
 {
 	wl->raw_fw_status = kzalloc(wl->fw_status_len, GFP_KERNEL);
@@ -1308,13 +1325,12 @@ static struct sk_buff *wl12xx_alloc_dummy_packet(struct wl1271 *wl)
 
 	skb_reserve(skb, sizeof(struct wl1271_tx_hw_descr));
 
-	hdr = (struct ieee80211_hdr_3addr *) skb_put(skb, sizeof(*hdr));
-	memset(hdr, 0, sizeof(*hdr));
+	hdr = skb_put_zero(skb, sizeof(*hdr));
 	hdr->frame_control = cpu_to_le16(IEEE80211_FTYPE_DATA |
 					 IEEE80211_STYPE_NULLFUNC |
 					 IEEE80211_FCTL_TODS);
 
-	memset(skb_put(skb, dummy_packet_size), 0, dummy_packet_size);
+	skb_put_zero(skb, dummy_packet_size);
 
 	/* Dummy packets require the TID to be management */
 	skb->priority = WL1271_TID_MGMT;
@@ -1327,7 +1343,6 @@ static struct sk_buff *wl12xx_alloc_dummy_packet(struct wl1271 *wl)
 }
 
 
-#ifdef CONFIG_PM
 static int
 wl1271_validate_wowlan_pattern(struct cfg80211_pkt_pattern *p)
 {
@@ -1699,8 +1714,8 @@ static void wl1271_configure_resume(struct wl1271 *wl, struct wl12xx_vif *wlvif)
 	}
 }
 
-static int wl1271_op_suspend(struct ieee80211_hw *hw,
-			    struct cfg80211_wowlan *wow)
+static int __maybe_unused wl1271_op_suspend(struct ieee80211_hw *hw,
+					    struct cfg80211_wowlan *wow)
 {
 	struct wl1271 *wl = hw->priv;
 	struct wl12xx_vif *wlvif;
@@ -1750,7 +1765,6 @@ static int wl1271_op_suspend(struct ieee80211_hw *hw,
 		goto out_sleep;
 
 out_sleep:
-	wl1271_ps_elp_sleep(wl);
 	mutex_unlock(&wl->mutex);
 
 	if (ret < 0) {
@@ -1783,10 +1797,19 @@ out_sleep:
 	 */
 	cancel_delayed_work(&wl->tx_watchdog_work);
 
+	/*
+	 * Use an immediate call for allowing the firmware to go into power
+	 * save during suspend.
+	 * Using a workque for this last write was only hapenning on resume
+	 * leaving the firmware with power save disabled during suspend,
+	 * while consuming full power during wowlan suspend.
+	 */
+	wlcore_fw_sleep(wl);
+
 	return 0;
 }
 
-static int wl1271_op_resume(struct ieee80211_hw *hw)
+static int __maybe_unused wl1271_op_resume(struct ieee80211_hw *hw)
 {
 	struct wl1271 *wl = hw->priv;
 	struct wl12xx_vif *wlvif;
@@ -1870,7 +1893,6 @@ out:
 
 	return 0;
 }
-#endif
 
 static int wl1271_op_start(struct ieee80211_hw *hw)
 {
@@ -2280,8 +2302,7 @@ static int wl12xx_init_vif_data(struct wl1271 *wl, struct ieee80211_vif *vif)
 			  wlcore_pending_auth_complete_work);
 	INIT_LIST_HEAD(&wlvif->list);
 
-	setup_timer(&wlvif->rx_streaming_timer, wl1271_rx_streaming_timer,
-		    (unsigned long) wlvif);
+	timer_setup(&wlvif->rx_streaming_timer, wl1271_rx_streaming_timer, 0);
 	return 0;
 }
 
@@ -3201,6 +3222,21 @@ static void wl1271_op_configure_filter(struct ieee80211_hw *hw,
 							fp->mc_list_length);
 			if (ret < 0)
 				goto out_sleep;
+		}
+
+		/*
+		 * If interface in AP mode and created with allmulticast then disable
+		 * the firmware filters so that all multicast packets are passed
+		 * This is mandatory for MDNS based discovery protocols 
+		 */
+ 		if (wlvif->bss_type == BSS_TYPE_AP_BSS) {
+ 			if (*total & FIF_ALLMULTI) {
+				ret = wl1271_acx_group_address_tbl(wl, wlvif,
+							false,
+							NULL, 0);
+				if (ret < 0)
+					goto out_sleep;
+			}
 		}
 	}
 
@@ -4986,7 +5022,6 @@ static int wl12xx_sta_add(struct wl1271 *wl,
 		return ret;
 
 	wl_sta = (struct wl1271_station *)sta->drv_priv;
-	wl_sta->wl = wl;
 	hlid = wl_sta->hlid;
 
 	ret = wl12xx_cmd_add_peer(wl, wlvif, sta, hlid);
@@ -5286,7 +5321,9 @@ static int wl1271_op_ampdu_action(struct ieee80211_hw *hw,
 		}
 
 		ret = wl12xx_acx_set_ba_receiver_session(wl, tid, *ssn, true,
-							 hlid);
+				hlid,
+				params->buf_size);
+
 		if (!ret) {
 			*ba_bitmap |= BIT(tid);
 			wl->ba_rx_session_count++;
@@ -5307,7 +5344,7 @@ static int wl1271_op_ampdu_action(struct ieee80211_hw *hw,
 		}
 
 		ret = wl12xx_acx_set_ba_receiver_session(wl, tid, 0, false,
-							 hlid);
+							 hlid, 0);
 		if (!ret) {
 			*ba_bitmap &= ~BIT(tid);
 			wl->ba_rx_session_count--;
@@ -6001,6 +6038,8 @@ static int wl1271_register_hw(struct wl1271 *wl)
 {
 	int ret;
 	u32 oui_addr = 0, nic_addr = 0;
+	struct platform_device *pdev = wl->pdev;
+	struct wlcore_platdev_data *pdev_data = dev_get_platdata(&pdev->dev);
 
 	if (wl->mac80211_registered)
 		return 0;
@@ -6023,6 +6062,27 @@ static int wl1271_register_hw(struct wl1271 *wl)
 		oui_addr = wl->fuse_oui_addr;
 		/* fuse has the BD_ADDR, the WLAN addresses are the next two */
 		nic_addr = wl->fuse_nic_addr + 1;
+	}
+
+	if (oui_addr == 0xdeadbe && nic_addr == 0xef0000) {
+		wl1271_warning("Detected unconfigured mac address in nvs, derive from fuse instead.\n");
+		if (!strcmp(pdev_data->family->name, "wl18xx")) {
+			wl1271_warning("This default nvs file can be removed from the file system\n");
+		} else {
+			wl1271_warning("Your device performance is not optimized.\n");
+			wl1271_warning("Please use the calibrator tool to configure your device.\n");
+		}
+
+		if (wl->fuse_oui_addr == 0 && wl->fuse_nic_addr == 0) {
+			wl1271_warning("Fuse mac address is zero. using random mac\n");
+			/* Use TI oui and a random nic */
+			oui_addr = WLCORE_TI_OUI_ADDRESS;
+			nic_addr = get_random_int();
+		} else {
+			oui_addr = wl->fuse_oui_addr;
+			/* fuse has the BD_ADDR, the WLAN addresses are the next two */
+			nic_addr = wl->fuse_nic_addr + 1;
+		}
 	}
 
 	wl12xx_derive_mac_addresses(wl, oui_addr, nic_addr);
@@ -6087,6 +6147,7 @@ static int wl1271_init_ieee80211(struct wl1271 *wl)
 	ieee80211_hw_set(wl->hw, SUPPORTS_DYNAMIC_PS);
 	ieee80211_hw_set(wl->hw, SIGNAL_DBM);
 	ieee80211_hw_set(wl->hw, SUPPORTS_PS);
+	ieee80211_hw_set(wl->hw, SUPPORTS_TX_FRAG);
 
 	wl->hw->wiphy->cipher_suites = cipher_suites;
 	wl->hw->wiphy->n_cipher_suites = ARRAY_SIZE(cipher_suites);
@@ -6111,6 +6172,7 @@ static int wl1271_init_ieee80211(struct wl1271 *wl)
 	wl->hw->wiphy->max_scan_ie_len = WL1271_CMD_TEMPL_MAX_SIZE -
 			sizeof(struct ieee80211_header);
 
+	wl->hw->wiphy->max_sched_scan_reqs = 1;
 	wl->hw->wiphy->max_sched_scan_ie_len = WL1271_CMD_TEMPL_MAX_SIZE -
 		sizeof(struct ieee80211_header);
 
@@ -6118,8 +6180,9 @@ static int wl1271_init_ieee80211(struct wl1271 *wl)
 
 	wl->hw->wiphy->flags |= WIPHY_FLAG_AP_UAPSD |
 				WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL |
-				WIPHY_FLAG_SUPPORTS_SCHED_SCAN |
 				WIPHY_FLAG_HAS_CHANNEL_SWITCH;
+
+	wl->hw->wiphy->features |= NL80211_FEATURE_AP_SCAN;
 
 	/* make sure all our channels fit in the scanned_ch bitmask */
 	BUILD_BUG_ON(ARRAY_SIZE(wl1271_channels) +
@@ -6414,9 +6477,12 @@ static void wlcore_nvs_cb(const struct firmware *fw, void *context)
 			goto out;
 		}
 		wl->nvs_len = fw->size;
-	} else {
+	} else if (pdev_data->family->nvs_name) {
 		wl1271_debug(DEBUG_BOOT, "Could not get nvs file %s",
-			     WL12XX_NVS_NAME);
+			     pdev_data->family->nvs_name);
+		wl->nvs = NULL;
+		wl->nvs_len = 0;
+	} else {
 		wl->nvs = NULL;
 		wl->nvs_len = 0;
 	}
@@ -6511,21 +6577,29 @@ out:
 
 int wlcore_probe(struct wl1271 *wl, struct platform_device *pdev)
 {
-	int ret;
+	struct wlcore_platdev_data *pdev_data = dev_get_platdata(&pdev->dev);
+	const char *nvs_name;
+	int ret = 0;
 
-	if (!wl->ops || !wl->ptable)
+	if (!wl->ops || !wl->ptable || !pdev_data)
 		return -EINVAL;
 
 	wl->dev = &pdev->dev;
 	wl->pdev = pdev;
 	platform_set_drvdata(pdev, wl);
 
-	ret = request_firmware_nowait(THIS_MODULE, FW_ACTION_HOTPLUG,
-				      WL12XX_NVS_NAME, &pdev->dev, GFP_KERNEL,
-				      wl, wlcore_nvs_cb);
-	if (ret < 0) {
-		wl1271_error("request_firmware_nowait failed: %d", ret);
-		complete_all(&wl->nvs_loading_complete);
+	if (pdev_data->family && pdev_data->family->nvs_name) {
+		nvs_name = pdev_data->family->nvs_name;
+		ret = request_firmware_nowait(THIS_MODULE, FW_ACTION_HOTPLUG,
+					      nvs_name, &pdev->dev, GFP_KERNEL,
+					      wl, wlcore_nvs_cb);
+		if (ret < 0) {
+			wl1271_error("request_firmware_nowait failed for %s: %d",
+				     nvs_name, ret);
+			complete_all(&wl->nvs_loading_complete);
+		}
+	} else {
+		wlcore_nvs_cb(NULL, wl);
 	}
 
 	return ret;
@@ -6534,9 +6608,11 @@ EXPORT_SYMBOL_GPL(wlcore_probe);
 
 int wlcore_remove(struct platform_device *pdev)
 {
+	struct wlcore_platdev_data *pdev_data = dev_get_platdata(&pdev->dev);
 	struct wl1271 *wl = platform_get_drvdata(pdev);
 
-	wait_for_completion(&wl->nvs_loading_complete);
+	if (pdev_data->family && pdev_data->family->nvs_name)
+		wait_for_completion(&wl->nvs_loading_complete);
 	if (!wl->initialized)
 		return 0;
 
@@ -6554,23 +6630,22 @@ EXPORT_SYMBOL_GPL(wlcore_remove);
 
 u32 wl12xx_debug_level = DEBUG_NONE;
 EXPORT_SYMBOL_GPL(wl12xx_debug_level);
-module_param_named(debug_level, wl12xx_debug_level, uint, S_IRUSR | S_IWUSR);
+module_param_named(debug_level, wl12xx_debug_level, uint, 0600);
 MODULE_PARM_DESC(debug_level, "wl12xx debugging level");
 
 module_param_named(fwlog, fwlog_param, charp, 0);
 MODULE_PARM_DESC(fwlog,
 		 "FW logger options: continuous, dbgpins or disable");
 
-module_param(fwlog_mem_blocks, int, S_IRUSR | S_IWUSR);
+module_param(fwlog_mem_blocks, int, 0600);
 MODULE_PARM_DESC(fwlog_mem_blocks, "fwlog mem_blocks");
 
-module_param(bug_on_recovery, int, S_IRUSR | S_IWUSR);
+module_param(bug_on_recovery, int, 0600);
 MODULE_PARM_DESC(bug_on_recovery, "BUG() on fw recovery");
 
-module_param(no_recovery, int, S_IRUSR | S_IWUSR);
+module_param(no_recovery, int, 0600);
 MODULE_PARM_DESC(no_recovery, "Prevent HW recovery. FW will remain stuck.");
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Luciano Coelho <coelho@ti.com>");
 MODULE_AUTHOR("Juuso Oikarinen <juuso.oikarinen@nokia.com>");
-MODULE_FIRMWARE(WL12XX_NVS_NAME);

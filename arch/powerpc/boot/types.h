@@ -1,5 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _TYPES_H_
 #define _TYPES_H_
+
+#include <stdbool.h>
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
@@ -34,4 +37,16 @@ typedef s64 int64_t;
 	(void) (&_x == &_y);	\
 	_x > _y ? _x : _y; })
 
+#define min_t(type, a, b) min(((type) a), ((type) b))
+#define max_t(type, a, b) max(((type) a), ((type) b))
+
+typedef int bool;
+
+#ifndef true
+#define true 1
+#endif
+
+#ifndef false
+#define false 0
+#endif
 #endif /* _TYPES_H_ */

@@ -32,6 +32,9 @@ static void tcp_gso_tstamp(struct sk_buff *skb, unsigned int ts_seq,
 static struct sk_buff *tcp4_gso_segment(struct sk_buff *skb,
 					netdev_features_t features)
 {
+	if (!(skb_shinfo(skb)->gso_type & SKB_GSO_TCPV4))
+		return ERR_PTR(-EINVAL);
+
 	if (!pskb_may_pull(skb, sizeof(struct tcphdr)))
 		return ERR_PTR(-EINVAL);
 
@@ -90,12 +93,6 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 		goto out;
 	}
 
-	/* GSO partial only requires splitting the frame into an MSS
-	 * multiple and possibly a remainder.  So update the mss now.
-	 */
-	if (features & NETIF_F_GSO_PARTIAL)
-		mss = skb->len - (skb->len % mss);
-
 	copy_destructor = gso_skb->destructor == tcp_wfree;
 	ooo_okay = gso_skb->ooo_okay;
 	/* All segments but the first should have ooo_okay cleared */
@@ -107,6 +104,13 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 
 	/* Only first segment might have ooo_okay set */
 	segs->ooo_okay = ooo_okay;
+
+	/* GSO partial and frag_list segmentation only requires splitting
+	 * the frame into an MSS multiple and possibly a remainder, both
+	 * cases return a GSO skb. So update the mss now.
+	 */
+	if (skb_is_gso(segs))
+		mss *= skb_shinfo(segs)->gso_segs;
 
 	delta = htonl(oldlen + (thlen + mss));
 
@@ -148,11 +152,19 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	 * is freed by GSO engine
 	 */
 	if (copy_destructor) {
+		int delta;
+
 		swap(gso_skb->sk, skb->sk);
 		swap(gso_skb->destructor, skb->destructor);
 		sum_truesize += skb->truesize;
-		atomic_add(sum_truesize - gso_skb->truesize,
-			   &skb->sk->sk_wmem_alloc);
+		delta = sum_truesize - gso_skb->truesize;
+		/* In some pathological cases, delta can be negative.
+		 * We need to either use refcount_add() or refcount_sub_and_test()
+		 */
+		if (likely(delta >= 0))
+			refcount_add(delta, &skb->sk->sk_wmem_alloc);
+		else
+			WARN_ON_ONCE(refcount_sub_and_test(-delta, &skb->sk->sk_wmem_alloc));
 	}
 
 	delta = htonl(oldlen + (skb_tail_pointer(skb) -

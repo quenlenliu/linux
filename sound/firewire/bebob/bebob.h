@@ -17,6 +17,7 @@
 #include <linux/mod_devicetable.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
+#include <linux/sched/signal.h>
 
 #include <sound/core.h>
 #include <sound/initval.h>
@@ -57,7 +58,7 @@ enum snd_bebob_clock_type {
 struct snd_bebob_clock_spec {
 	unsigned int num;
 	const char *const *labels;
-	enum snd_bebob_clock_type *types;
+	const enum snd_bebob_clock_type *types;
 	int (*get)(struct snd_bebob *bebob, unsigned int *id);
 };
 struct snd_bebob_rate_spec {
@@ -235,8 +236,7 @@ int snd_bebob_create_hwdep_device(struct snd_bebob *bebob);
 
 /* model specific operations */
 extern const struct snd_bebob_spec phase88_rack_spec;
-extern const struct snd_bebob_spec phase24_series_spec;
-extern const struct snd_bebob_spec yamaha_go_spec;
+extern const struct snd_bebob_spec yamaha_terratec_spec;
 extern const struct snd_bebob_spec saffirepro_26_spec;
 extern const struct snd_bebob_spec saffirepro_10_spec;
 extern const struct snd_bebob_spec saffire_le_spec;

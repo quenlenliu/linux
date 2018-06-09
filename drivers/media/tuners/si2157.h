@@ -17,9 +17,8 @@
 #ifndef SI2157_H
 #define SI2157_H
 
-#include <linux/kconfig.h>
 #include <media/media-device.h>
-#include "dvb_frontend.h"
+#include <media/dvb_frontend.h>
 
 /*
  * I2C address

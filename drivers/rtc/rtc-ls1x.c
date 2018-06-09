@@ -98,7 +98,7 @@ static int ls1x_rtc_read_time(struct device *dev, struct rtc_time *rtm)
 			ls1x_get_min(v), ls1x_get_sec(v));
 	rtc_time_to_tm(t, rtm);
 
-	return rtc_valid_tm(rtm);
+	return 0;
 }
 
 static int ls1x_rtc_set_time(struct device *dev, struct  rtc_time *rtm)
@@ -138,7 +138,7 @@ err:
 	return ret;
 }
 
-static struct rtc_class_ops  ls1x_rtc_ops = {
+static const struct rtc_class_ops  ls1x_rtc_ops = {
 	.read_time	= ls1x_rtc_read_time,
 	.set_time	= ls1x_rtc_set_time,
 };

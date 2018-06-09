@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_POWERPC_ATOMIC_H_
 #define _ASM_POWERPC_ATOMIC_H_
 
@@ -233,7 +234,7 @@ static __inline__ int __atomic_add_unless(atomic_t *v, int a, int u)
 	PPC_ATOMIC_ENTRY_BARRIER
 "1:	lwarx	%0,0,%1		# __atomic_add_unless\n\
 	cmpw	0,%0,%3 \n\
-	beq-	2f \n\
+	beq	2f \n\
 	add	%0,%2,%0 \n"
 	PPC405_ERR77(0,%2)
 "	stwcx.	%0,0,%1 \n\
@@ -539,7 +540,7 @@ static __inline__ int atomic64_add_unless(atomic64_t *v, long a, long u)
 	PPC_ATOMIC_ENTRY_BARRIER
 "1:	ldarx	%0,0,%1		# __atomic_add_unless\n\
 	cmpd	0,%0,%3 \n\
-	beq-	2f \n\
+	beq	2f \n\
 	add	%0,%2,%0 \n"
 "	stdcx.	%0,0,%1 \n\
 	bne-	1b \n"
@@ -560,7 +561,7 @@ static __inline__ int atomic64_add_unless(atomic64_t *v, long a, long u)
  * Atomically increments @v by 1, so long as @v is non-zero.
  * Returns non-zero if @v was non-zero, and zero otherwise.
  */
-static __inline__ long atomic64_inc_not_zero(atomic64_t *v)
+static __inline__ int atomic64_inc_not_zero(atomic64_t *v)
 {
 	long t1, t2;
 
@@ -579,7 +580,7 @@ static __inline__ long atomic64_inc_not_zero(atomic64_t *v)
 	: "r" (&v->counter)
 	: "cc", "xer", "memory");
 
-	return t1;
+	return t1 != 0;
 }
 
 #endif /* __powerpc64__ */

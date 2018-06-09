@@ -253,7 +253,7 @@ mwifiex_cmd_append_wps_ie(struct mwifiex_private *priv, u8 **buffer)
 			    priv->wps_ie_len, *buffer);
 
 		/* Wrap the generic IE buffer with a pass through TLV type */
-		ie_header.type = cpu_to_le16(TLV_TYPE_MGMT_IE);
+		ie_header.type = cpu_to_le16(TLV_TYPE_PASSTHROUGH);
 		ie_header.len = cpu_to_le16(priv->wps_ie_len);
 		memcpy(*buffer, &ie_header, sizeof(ie_header));
 		*buffer += sizeof(ie_header);
@@ -669,9 +669,8 @@ int mwifiex_ret_802_11_associate(struct mwifiex_private *priv,
 	priv->assoc_rsp_size = min(le16_to_cpu(resp->size) - S_DS_GEN,
 				   sizeof(priv->assoc_rsp_buf));
 
-	memcpy(priv->assoc_rsp_buf, &resp->params, priv->assoc_rsp_size);
-
 	assoc_rsp->a_id = cpu_to_le16(aid);
+	memcpy(priv->assoc_rsp_buf, &resp->params, priv->assoc_rsp_size);
 
 	if (status_code) {
 		priv->adapter->dbg.num_cmd_assoc_failure++;

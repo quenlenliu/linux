@@ -50,7 +50,7 @@
 					STACK_ALLOC_ALIGN)
 #define STACK_ALLOC_INDEX_BITS (DEPOT_STACK_BITS - \
 		STACK_ALLOC_NULL_PROTECTION_BITS - STACK_ALLOC_OFFSET_BITS)
-#define STACK_ALLOC_SLABS_CAP 1024
+#define STACK_ALLOC_SLABS_CAP 8192
 #define STACK_ALLOC_MAX_SLABS \
 	(((1LL << (STACK_ALLOC_INDEX_BITS)) < STACK_ALLOC_SLABS_CAP) ? \
 	 (1LL << (STACK_ALLOC_INDEX_BITS)) : STACK_ALLOC_SLABS_CAP)
@@ -163,6 +163,21 @@ static inline u32 hash_stack(unsigned long *entries, unsigned int size)
 			       STACK_HASH_SEED);
 }
 
+/* Use our own, non-instrumented version of memcmp().
+ *
+ * We actually don't care about the order, just the equality.
+ */
+static inline
+int stackdepot_memcmp(const unsigned long *u1, const unsigned long *u2,
+			unsigned int n)
+{
+	for ( ; n-- ; u1++, u2++) {
+		if (*u1 != *u2)
+			return 1;
+	}
+	return 0;
+}
+
 /* Find a stack that is equal to the one stored in entries in the hash */
 static inline struct stack_record *find_stack(struct stack_record *bucket,
 					     unsigned long *entries, int size,
@@ -173,10 +188,8 @@ static inline struct stack_record *find_stack(struct stack_record *bucket,
 	for (found = bucket; found; found = found->next) {
 		if (found->hash == hash &&
 		    found->size == size &&
-		    !memcmp(entries, found->entries,
-			    size * sizeof(unsigned long))) {
+		    !stackdepot_memcmp(entries, found->entries, size))
 			return found;
-		}
 	}
 	return NULL;
 }
@@ -192,6 +205,7 @@ void depot_fetch_stack(depot_stack_handle_t handle, struct stack_trace *trace)
 	trace->entries = stack->entries;
 	trace->skip = 0;
 }
+EXPORT_SYMBOL_GPL(depot_fetch_stack);
 
 /**
  * depot_save_stack - save stack in a stack depot.
@@ -283,3 +297,4 @@ exit:
 fast_exit:
 	return retval;
 }
+EXPORT_SYMBOL_GPL(depot_save_stack);

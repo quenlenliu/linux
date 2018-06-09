@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -37,9 +38,9 @@
 
 #define DEBUG_SUBSYSTEM S_LDLM
 
-#include "../../include/linux/libcfs/libcfs.h"
-#include "../include/lustre_dlm.h"
-#include "../include/obd_class.h"
+#include <linux/libcfs/libcfs.h>
+#include <lustre_dlm.h>
+#include <obd_class.h>
 #include <linux/list.h>
 #include "ldlm_internal.h"
 
@@ -162,7 +163,7 @@ static void ldlm_handle_cp_callback(struct ptlrpc_request *req,
 	LDLM_DEBUG(lock, "client completion callback handler START");
 
 	if (OBD_FAIL_CHECK(OBD_FAIL_LDLM_CANCEL_BL_CB_RACE)) {
-		int to = cfs_time_seconds(1);
+		int to = HZ;
 
 		while (to > 0) {
 			set_current_state(TASK_INTERRUPTIBLE);
@@ -184,7 +185,8 @@ static void ldlm_handle_cp_callback(struct ptlrpc_request *req,
 			LASSERT(lock->l_lvb_data);
 
 			if (unlikely(lock->l_lvb_len < lvb_len)) {
-				LDLM_ERROR(lock, "Replied LVB is larger than expectation, expected = %d, replied = %d",
+				LDLM_ERROR(lock,
+					   "Replied LVB is larger than expectation, expected = %d, replied = %d",
 					   lock->l_lvb_len, lvb_len);
 				rc = -EINVAL;
 				goto out;
@@ -325,7 +327,7 @@ static void ldlm_handle_gl_callback(struct ptlrpc_request *req,
 	    !lock->l_readers && !lock->l_writers &&
 	    cfs_time_after(cfs_time_current(),
 			   cfs_time_add(lock->l_last_used,
-					cfs_time_seconds(10)))) {
+					10 * HZ))) {
 		unlock_res_and_lock(lock);
 		if (ldlm_bl_to_thread_lock(ns, NULL, lock))
 			ldlm_handle_bl_callback(ns, NULL, lock);
@@ -454,6 +456,12 @@ int ldlm_bl_to_thread_list(struct ldlm_namespace *ns, struct ldlm_lock_desc *ld,
 	return ldlm_bl_to_thread(ns, ld, NULL, cancels, count, cancel_flags);
 }
 
+int ldlm_bl_thread_wakeup(void)
+{
+	wake_up(&ldlm_state->ldlm_bl_pool->blp_waitq);
+	return 0;
+}
+
 /* Setinfo coming from Server (eg MDT) to Client (eg MDC)! */
 static int ldlm_handle_setinfo(struct ptlrpc_request *req)
 {
@@ -511,23 +519,6 @@ static inline void ldlm_callback_errmsg(struct ptlrpc_request *req,
 		CWARN("Send reply failed, maybe cause bug 21636.\n");
 }
 
-static int ldlm_handle_qc_callback(struct ptlrpc_request *req)
-{
-	struct obd_quotactl *oqctl;
-	struct client_obd *cli = &req->rq_export->exp_obd->u.cli;
-
-	oqctl = req_capsule_client_get(&req->rq_pill, &RMF_OBD_QUOTACTL);
-	if (!oqctl) {
-		CERROR("Can't unpack obd_quotactl\n");
-		return -EPROTO;
-	}
-
-	oqctl->qc_stat = ptlrpc_status_ntoh(oqctl->qc_stat);
-
-	cli->cl_qchk_stat = oqctl->qc_stat;
-	return 0;
-}
-
 /* TODO: handle requests in a similar way as MDT: see mdt_handle_common() */
 static int ldlm_callback_handler(struct ptlrpc_request *req)
 {
@@ -559,8 +550,11 @@ static int ldlm_callback_handler(struct ptlrpc_request *req)
 
 	switch (lustre_msg_get_opc(req->rq_reqmsg)) {
 	case LDLM_BL_CALLBACK:
-		if (OBD_FAIL_CHECK(OBD_FAIL_LDLM_BL_CALLBACK_NET))
+		if (OBD_FAIL_CHECK(OBD_FAIL_LDLM_BL_CALLBACK_NET)) {
+			if (cfs_fail_err)
+				ldlm_callback_reply(req, -(int)cfs_fail_err);
 			return 0;
+		}
 		break;
 	case LDLM_CP_CALLBACK:
 		if (OBD_FAIL_CHECK(OBD_FAIL_LDLM_CP_CALLBACK_NET))
@@ -572,13 +566,6 @@ static int ldlm_callback_handler(struct ptlrpc_request *req)
 		break;
 	case LDLM_SET_INFO:
 		rc = ldlm_handle_setinfo(req);
-		ldlm_callback_reply(req, rc);
-		return 0;
-	case OBD_QC_CALLBACK:
-		req_capsule_set(&req->rq_pill, &RQF_QC_CALLBACK);
-		if (OBD_FAIL_CHECK(OBD_FAIL_OBD_QC_CALLBACK_NET))
-			return 0;
-		rc = ldlm_handle_qc_callback(req);
 		ldlm_callback_reply(req, rc);
 		return 0;
 	default:
@@ -613,7 +600,8 @@ static int ldlm_callback_handler(struct ptlrpc_request *req)
 
 	lock = ldlm_handle2lock_long(&dlm_req->lock_handle[0], 0);
 	if (!lock) {
-		CDEBUG(D_DLMTRACE, "callback on lock %#llx - lock disappeared\n",
+		CDEBUG(D_DLMTRACE,
+		       "callback on lock %#llx - lock disappeared\n",
 		       dlm_req->lock_handle[0].cookie);
 		rc = ldlm_callback_reply(req, -EINVAL);
 		ldlm_callback_errmsg(req, "Operate with invalid parameter", rc,
@@ -696,8 +684,11 @@ static int ldlm_callback_handler(struct ptlrpc_request *req)
 	return 0;
 }
 
-static struct ldlm_bl_work_item *ldlm_bl_get_work(struct ldlm_bl_pool *blp)
+static int ldlm_bl_get_work(struct ldlm_bl_pool *blp,
+			    struct ldlm_bl_work_item **p_blwi,
+			    struct obd_export **p_exp)
 {
+	int num_th = atomic_read(&blp->blp_num_threads);
 	struct ldlm_bl_work_item *blwi = NULL;
 	static unsigned int num_bl;
 
@@ -705,27 +696,27 @@ static struct ldlm_bl_work_item *ldlm_bl_get_work(struct ldlm_bl_pool *blp)
 	/* process a request from the blp_list at least every blp_num_threads */
 	if (!list_empty(&blp->blp_list) &&
 	    (list_empty(&blp->blp_prio_list) || num_bl == 0))
-		blwi = list_entry(blp->blp_list.next,
-				      struct ldlm_bl_work_item, blwi_entry);
+		blwi = list_first_entry(&blp->blp_list,
+					struct ldlm_bl_work_item, blwi_entry);
 	else
 		if (!list_empty(&blp->blp_prio_list))
-			blwi = list_entry(blp->blp_prio_list.next,
-					      struct ldlm_bl_work_item,
-					      blwi_entry);
+			blwi = list_first_entry(&blp->blp_prio_list,
+						struct ldlm_bl_work_item,
+						blwi_entry);
 
 	if (blwi) {
-		if (++num_bl >= atomic_read(&blp->blp_num_threads))
+		if (++num_bl >= num_th)
 			num_bl = 0;
 		list_del(&blwi->blwi_entry);
 	}
 	spin_unlock(&blp->blp_lock);
+	*p_blwi = blwi;
 
-	return blwi;
+	return (*p_blwi || *p_exp) ? 1 : 0;
 }
 
 /* This only contains temporary data until the thread starts */
 struct ldlm_bl_thread_data {
-	char			bltd_name[CFS_CURPROC_COMM_MAX];
 	struct ldlm_bl_pool	*bltd_blp;
 	struct completion	bltd_comp;
 	int			bltd_num;
@@ -733,22 +724,93 @@ struct ldlm_bl_thread_data {
 
 static int ldlm_bl_thread_main(void *arg);
 
-static int ldlm_bl_thread_start(struct ldlm_bl_pool *blp)
+static int ldlm_bl_thread_start(struct ldlm_bl_pool *blp, bool check_busy)
 {
 	struct ldlm_bl_thread_data bltd = { .bltd_blp = blp };
 	struct task_struct *task;
 
 	init_completion(&bltd.bltd_comp);
-	bltd.bltd_num = atomic_read(&blp->blp_num_threads);
-	snprintf(bltd.bltd_name, sizeof(bltd.bltd_name),
-		"ldlm_bl_%02d", bltd.bltd_num);
-	task = kthread_run(ldlm_bl_thread_main, &bltd, "%s", bltd.bltd_name);
+
+	bltd.bltd_num = atomic_inc_return(&blp->blp_num_threads);
+	if (bltd.bltd_num >= blp->blp_max_threads) {
+		atomic_dec(&blp->blp_num_threads);
+		return 0;
+	}
+
+	LASSERTF(bltd.bltd_num > 0, "thread num:%d\n", bltd.bltd_num);
+	if (check_busy &&
+	    atomic_read(&blp->blp_busy_threads) < (bltd.bltd_num - 1)) {
+		atomic_dec(&blp->blp_num_threads);
+		return 0;
+	}
+
+	task = kthread_run(ldlm_bl_thread_main, &bltd, "ldlm_bl_%02d",
+			   bltd.bltd_num);
 	if (IS_ERR(task)) {
 		CERROR("cannot start LDLM thread ldlm_bl_%02d: rc %ld\n",
-		       atomic_read(&blp->blp_num_threads), PTR_ERR(task));
+		       bltd.bltd_num, PTR_ERR(task));
+		atomic_dec(&blp->blp_num_threads);
 		return PTR_ERR(task);
 	}
 	wait_for_completion(&bltd.bltd_comp);
+
+	return 0;
+}
+
+/* Not fatal if racy and have a few too many threads */
+static int ldlm_bl_thread_need_create(struct ldlm_bl_pool *blp,
+				      struct ldlm_bl_work_item *blwi)
+{
+	if (atomic_read(&blp->blp_num_threads) >= blp->blp_max_threads)
+		return 0;
+
+	if (atomic_read(&blp->blp_busy_threads) <
+	    atomic_read(&blp->blp_num_threads))
+		return 0;
+
+	if (blwi && (!blwi->blwi_ns || blwi->blwi_mem_pressure))
+		return 0;
+
+	return 1;
+}
+
+static int ldlm_bl_thread_blwi(struct ldlm_bl_pool *blp,
+			       struct ldlm_bl_work_item *blwi)
+{
+	if (!blwi->blwi_ns)
+		/* added by ldlm_cleanup() */
+		return LDLM_ITER_STOP;
+
+	if (blwi->blwi_mem_pressure)
+		memory_pressure_set();
+
+	OBD_FAIL_TIMEOUT(OBD_FAIL_LDLM_PAUSE_CANCEL2, 4);
+
+	if (blwi->blwi_count) {
+		int count;
+
+		/*
+		 * The special case when we cancel locks in lru
+		 * asynchronously, we pass the list of locks here.
+		 * Thus locks are marked LDLM_FL_CANCELING, but NOT
+		 * canceled locally yet.
+		 */
+		count = ldlm_cli_cancel_list_local(&blwi->blwi_head,
+						   blwi->blwi_count,
+						   LCF_BL_AST);
+		ldlm_cli_cancel_list(&blwi->blwi_head, count, NULL,
+				     blwi->blwi_flags);
+	} else {
+		ldlm_handle_bl_callback(blwi->blwi_ns, &blwi->blwi_ld,
+					blwi->blwi_lock);
+	}
+	if (blwi->blwi_mem_pressure)
+		memory_pressure_clr();
+
+	if (blwi->blwi_flags & LCF_ASYNC)
+		kfree(blwi);
+	else
+		complete(&blwi->blwi_comp);
 
 	return 0;
 }
@@ -763,76 +825,38 @@ static int ldlm_bl_thread_start(struct ldlm_bl_pool *blp)
 static int ldlm_bl_thread_main(void *arg)
 {
 	struct ldlm_bl_pool *blp;
+	struct ldlm_bl_thread_data *bltd = arg;
 
-	{
-		struct ldlm_bl_thread_data *bltd = arg;
+	blp = bltd->bltd_blp;
 
-		blp = bltd->bltd_blp;
-
-		atomic_inc(&blp->blp_num_threads);
-		atomic_inc(&blp->blp_busy_threads);
-
-		complete(&bltd->bltd_comp);
-		/* cannot use bltd after this, it is only on caller's stack */
-	}
+	complete(&bltd->bltd_comp);
+	/* cannot use bltd after this, it is only on caller's stack */
 
 	while (1) {
-		struct l_wait_info lwi = { 0 };
 		struct ldlm_bl_work_item *blwi = NULL;
-		int busy;
+		struct obd_export *exp = NULL;
+		int rc;
 
-		blwi = ldlm_bl_get_work(blp);
+		rc = ldlm_bl_get_work(blp, &blwi, &exp);
+		if (!rc)
+			wait_event_idle_exclusive(blp->blp_waitq,
+						  ldlm_bl_get_work(blp, &blwi,
+								   &exp));
+		atomic_inc(&blp->blp_busy_threads);
 
-		if (!blwi) {
-			atomic_dec(&blp->blp_busy_threads);
-			l_wait_event_exclusive(blp->blp_waitq,
-					 (blwi = ldlm_bl_get_work(blp)),
-					 &lwi);
-			busy = atomic_inc_return(&blp->blp_busy_threads);
-		} else {
-			busy = atomic_read(&blp->blp_busy_threads);
-		}
-
-		if (!blwi->blwi_ns)
-			/* added by ldlm_cleanup() */
-			break;
-
-		/* Not fatal if racy and have a few too many threads */
-		if (unlikely(busy < blp->blp_max_threads &&
-			     busy >= atomic_read(&blp->blp_num_threads) &&
-			     !blwi->blwi_mem_pressure))
+		if (ldlm_bl_thread_need_create(blp, blwi))
 			/* discard the return value, we tried */
-			ldlm_bl_thread_start(blp);
+			ldlm_bl_thread_start(blp, true);
 
-		if (blwi->blwi_mem_pressure)
-			memory_pressure_set();
+		if (blwi)
+			rc = ldlm_bl_thread_blwi(blp, blwi);
 
-		if (blwi->blwi_count) {
-			int count;
-			/* The special case when we cancel locks in LRU
-			 * asynchronously, we pass the list of locks here.
-			 * Thus locks are marked LDLM_FL_CANCELING, but NOT
-			 * canceled locally yet.
-			 */
-			count = ldlm_cli_cancel_list_local(&blwi->blwi_head,
-							   blwi->blwi_count,
-							   LCF_BL_AST);
-			ldlm_cli_cancel_list(&blwi->blwi_head, count, NULL,
-					     blwi->blwi_flags);
-		} else {
-			ldlm_handle_bl_callback(blwi->blwi_ns, &blwi->blwi_ld,
-						blwi->blwi_lock);
-		}
-		if (blwi->blwi_mem_pressure)
-			memory_pressure_clr();
+		atomic_dec(&blp->blp_busy_threads);
 
-		if (blwi->blwi_flags & LCF_ASYNC)
-			kfree(blwi);
-		else
-			complete(&blwi->blwi_comp);
+		if (rc == LDLM_ITER_STOP)
+			break;
 	}
 
-	atomic_dec(&blp->blp_busy_threads);
 	atomic_dec(&blp->blp_num_threads);
 	complete(&blp->blp_comp);
 	return 0;
@@ -845,6 +869,10 @@ int ldlm_get_ref(void)
 {
 	int rc = 0;
 
+	rc = ptlrpc_inc_ref();
+	if (rc)
+		return rc;
+
 	mutex_lock(&ldlm_ref_mutex);
 	if (++ldlm_refcount == 1) {
 		rc = ldlm_setup();
@@ -853,15 +881,18 @@ int ldlm_get_ref(void)
 	}
 	mutex_unlock(&ldlm_ref_mutex);
 
+	if (rc)
+		ptlrpc_dec_ref();
+
 	return rc;
 }
-EXPORT_SYMBOL(ldlm_get_ref);
 
 void ldlm_put_ref(void)
 {
+	int rc = 0;
 	mutex_lock(&ldlm_ref_mutex);
 	if (ldlm_refcount == 1) {
-		int rc = ldlm_cleanup();
+		rc = ldlm_cleanup();
 
 		if (rc)
 			CERROR("ldlm_cleanup failed: %d\n", rc);
@@ -871,10 +902,9 @@ void ldlm_put_ref(void)
 		ldlm_refcount--;
 	}
 	mutex_unlock(&ldlm_ref_mutex);
+	if (!rc)
+		ptlrpc_dec_ref();
 }
-EXPORT_SYMBOL(ldlm_put_ref);
-
-extern unsigned int ldlm_cancel_unused_locks_before_replay;
 
 static ssize_t cancel_unused_locks_before_replay_show(struct kobject *kobj,
 						      struct attribute *attr,
@@ -907,7 +937,7 @@ static struct attribute *ldlm_attrs[] = {
 	NULL,
 };
 
-static struct attribute_group ldlm_attr_group = {
+static const struct attribute_group ldlm_attr_group = {
 	.attrs = ldlm_attrs,
 };
 
@@ -1016,7 +1046,7 @@ static int ldlm_setup(void)
 	}
 
 	for (i = 0; i < blp->blp_min_threads; i++) {
-		rc = ldlm_bl_thread_start(blp);
+		rc = ldlm_bl_thread_start(blp, false);
 		if (rc < 0)
 			goto out;
 	}
@@ -1071,8 +1101,10 @@ static int ldlm_cleanup(void)
 		kset_unregister(ldlm_ns_kset);
 	if (ldlm_svc_kset)
 		kset_unregister(ldlm_svc_kset);
-	if (ldlm_kobj)
+	if (ldlm_kobj) {
+		sysfs_remove_group(ldlm_kobj, &ldlm_attr_group);
 		kobject_put(ldlm_kobj);
+	}
 
 	ldlm_debugfs_cleanup();
 
@@ -1094,16 +1126,17 @@ int ldlm_init(void)
 		return -ENOMEM;
 
 	ldlm_lock_slab = kmem_cache_create("ldlm_locks",
-			      sizeof(struct ldlm_lock), 0,
-			      SLAB_HWCACHE_ALIGN | SLAB_DESTROY_BY_RCU, NULL);
+					   sizeof(struct ldlm_lock), 0,
+					   SLAB_HWCACHE_ALIGN |
+					   SLAB_TYPESAFE_BY_RCU, NULL);
 	if (!ldlm_lock_slab) {
 		kmem_cache_destroy(ldlm_resource_slab);
 		return -ENOMEM;
 	}
 
 	ldlm_interval_slab = kmem_cache_create("interval_node",
-					sizeof(struct ldlm_interval),
-					0, SLAB_HWCACHE_ALIGN, NULL);
+					       sizeof(struct ldlm_interval),
+					       0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!ldlm_interval_slab) {
 		kmem_cache_destroy(ldlm_resource_slab);
 		kmem_cache_destroy(ldlm_lock_slab);
@@ -1118,7 +1151,7 @@ int ldlm_init(void)
 void ldlm_exit(void)
 {
 	if (ldlm_refcount)
-		CERROR("ldlm_refcount is %d in ldlm_exit!\n", ldlm_refcount);
+		CERROR("ldlm_refcount is %d in %s!\n", ldlm_refcount, __func__);
 	kmem_cache_destroy(ldlm_resource_slab);
 	/* ldlm_lock_put() use RCU to call ldlm_lock_free, so need call
 	 * synchronize_rcu() to wait a grace period elapsed, so that

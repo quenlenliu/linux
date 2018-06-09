@@ -50,22 +50,36 @@ enum sensors {
 	TEMP,
 	POWER_SUPPLY,
 	POWER_INPUT,
+	CURRENT,
+	ENERGY,
 	MAX_SENSOR_TYPE,
 };
 
 #define INVALID_INDEX (-1U)
 
+/*
+ * 'compatible' string properties for sensor types as defined in old
+ * PowerNV firmware (skiboot). These are ordered as 'enum sensors'.
+ */
+static const char * const legacy_compatibles[] = {
+	"ibm,opal-sensor-cooling-fan",
+	"ibm,opal-sensor-amb-temp",
+	"ibm,opal-sensor-power-supply",
+	"ibm,opal-sensor-power"
+};
+
 static struct sensor_group {
-	const char *name;
-	const char *compatible;
+	const char *name; /* matches property 'sensor-type' */
 	struct attribute_group group;
 	u32 attr_count;
 	u32 hwmon_index;
 } sensor_groups[] = {
-	{"fan", "ibm,opal-sensor-cooling-fan"},
-	{"temp", "ibm,opal-sensor-amb-temp"},
-	{"in", "ibm,opal-sensor-power-supply"},
-	{"power", "ibm,opal-sensor-power"}
+	{ "fan"   },
+	{ "temp"  },
+	{ "in"    },
+	{ "power" },
+	{ "curr"  },
+	{ "energy" },
 };
 
 struct sensor_data {
@@ -89,9 +103,10 @@ static ssize_t show_sensor(struct device *dev, struct device_attribute *devattr,
 	struct sensor_data *sdata = container_of(devattr, struct sensor_data,
 						 dev_attr);
 	ssize_t ret;
-	u32 x;
+	u64 x;
 
-	ret = opal_get_sensor_data(sdata->id, &x);
+	ret =  opal_get_sensor_data_u64(sdata->id, &x);
+
 	if (ret)
 		return ret;
 
@@ -102,7 +117,7 @@ static ssize_t show_sensor(struct device *dev, struct device_attribute *devattr,
 	else if (sdata->type == POWER_INPUT)
 		x *= 1000000;
 
-	return sprintf(buf, "%u\n", x);
+	return sprintf(buf, "%llu\n", x);
 }
 
 static ssize_t show_label(struct device *dev, struct device_attribute *devattr,
@@ -143,13 +158,11 @@ static void __init make_sensor_label(struct device_node *np,
 		if (cpuid >= 0)
 			/*
 			 * The digital thermal sensors are associated
-			 * with a core. Let's print out the range of
-			 * cpu ids corresponding to the hardware
-			 * threads of the core.
+			 * with a core.
 			 */
 			n += snprintf(sdata->label + n,
-				      sizeof(sdata->label) - n, " %d-%d",
-				      cpuid, cpuid + threads_per_core - 1);
+				      sizeof(sdata->label) - n, " %d",
+				      cpuid);
 		else
 			n += snprintf(sdata->label + n,
 				      sizeof(sdata->label) - n, " phy%d", id);
@@ -241,8 +254,8 @@ static int get_sensor_type(struct device_node *np)
 	enum sensors type;
 	const char *str;
 
-	for (type = 0; type < MAX_SENSOR_TYPE; type++) {
-		if (of_device_is_compatible(np, sensor_groups[type].compatible))
+	for (type = 0; type < ARRAY_SIZE(legacy_compatibles); type++) {
+		if (of_device_is_compatible(np, legacy_compatibles[type]))
 			return type;
 	}
 
@@ -300,9 +313,13 @@ static int populate_attr_groups(struct platform_device *pdev)
 		sensor_groups[type].attr_count++;
 
 		/*
-		 * add a new attribute for labels
+		 * add attributes for labels, min and max
 		 */
 		if (!of_property_read_string(np, "label", &label))
+			sensor_groups[type].attr_count++;
+		if (of_find_property(np, "sensor-data-min", NULL))
+			sensor_groups[type].attr_count++;
+		if (of_find_property(np, "sensor-data-max", NULL))
 			sensor_groups[type].attr_count++;
 	}
 
@@ -337,6 +354,41 @@ static void create_hwmon_attr(struct sensor_data *sdata, const char *attr_name,
 	sdata->dev_attr.attr.name = sdata->name;
 	sdata->dev_attr.attr.mode = S_IRUGO;
 	sdata->dev_attr.show = show;
+}
+
+static void populate_sensor(struct sensor_data *sdata, int od, int hd, int sid,
+			    const char *attr_name, enum sensors type,
+			    const struct attribute_group *pgroup,
+			    ssize_t (*show)(struct device *dev,
+					    struct device_attribute *attr,
+					    char *buf))
+{
+	sdata->id = sid;
+	sdata->type = type;
+	sdata->opal_index = od;
+	sdata->hwmon_index = hd;
+	create_hwmon_attr(sdata, attr_name, show);
+	pgroup->attrs[sensor_groups[type].attr_count++] = &sdata->dev_attr.attr;
+}
+
+static char *get_max_attr(enum sensors type)
+{
+	switch (type) {
+	case POWER_INPUT:
+		return "input_highest";
+	default:
+		return "highest";
+	}
+}
+
+static char *get_min_attr(enum sensors type)
+{
+	switch (type) {
+	case POWER_INPUT:
+		return "input_lowest";
+	default:
+		return "lowest";
+	}
 }
 
 /*
@@ -419,16 +471,31 @@ static int create_device_attrs(struct platform_device *pdev)
 			 * attribute. They are related to the same
 			 * sensor.
 			 */
-			sdata[count].type = type;
-			sdata[count].opal_index = sdata[count - 1].opal_index;
-			sdata[count].hwmon_index = sdata[count - 1].hwmon_index;
 
 			make_sensor_label(np, &sdata[count], label);
+			populate_sensor(&sdata[count], opal_index,
+					sdata[count - 1].hwmon_index,
+					sensor_id, "label", type, pgroups[type],
+					show_label);
+			count++;
+		}
 
-			create_hwmon_attr(&sdata[count], "label", show_label);
+		if (!of_property_read_u32(np, "sensor-data-max", &sensor_id)) {
+			attr_name = get_max_attr(type);
+			populate_sensor(&sdata[count], opal_index,
+					sdata[count - 1].hwmon_index,
+					sensor_id, attr_name, type,
+					pgroups[type], show_sensor);
+			count++;
+		}
 
-			pgroups[type]->attrs[sensor_groups[type].attr_count++] =
-				&sdata[count++].dev_attr.attr;
+		if (!of_property_read_u32(np, "sensor-data-min", &sensor_id)) {
+			attr_name = get_min_attr(type);
+			populate_sensor(&sdata[count], opal_index,
+					sdata[count - 1].hwmon_index,
+					sensor_id, attr_name, type,
+					pgroups[type], show_sensor);
+			count++;
 		}
 	}
 

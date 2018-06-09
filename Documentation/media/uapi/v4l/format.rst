@@ -22,7 +22,7 @@ to satisfy the request. Of course applications can also just query the
 current selection.
 
 A single mechanism exists to negotiate all data formats using the
-aggregate struct :ref:`v4l2_format <v4l2-format>` and the
+aggregate struct :c:type:`v4l2_format` and the
 :ref:`VIDIOC_G_FMT <VIDIOC_G_FMT>` and
 :ref:`VIDIOC_S_FMT <VIDIOC_G_FMT>` ioctls. Additionally the
 :ref:`VIDIOC_TRY_FMT <VIDIOC_G_FMT>` ioctl can be used to examine
@@ -78,7 +78,7 @@ output devices is available. [#f1]_
 The :ref:`VIDIOC_ENUM_FMT` ioctl must be supported
 by all drivers exchanging image data with applications.
 
-    **Important**
+.. important::
 
     Drivers are not supposed to convert image formats in kernel space.
     They must enumerate only formats directly supported by the hardware.

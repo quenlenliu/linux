@@ -1,15 +1,20 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_ALTERNATIVE_H
 #define __ASM_ALTERNATIVE_H
 
-#include <asm/cpufeature.h>
+#include <asm/cpucaps.h>
+#include <asm/insn.h>
+
+#define ARM64_CB_PATCH ARM64_NCAPS
 
 #ifndef __ASSEMBLY__
 
 #include <linux/init.h>
-#include <linux/kconfig.h>
 #include <linux/types.h>
 #include <linux/stddef.h>
 #include <linux/stringify.h>
+
+extern int alternatives_applied;
 
 struct alt_instr {
 	s32 orig_offset;	/* offset to original instruction */
@@ -19,12 +24,19 @@ struct alt_instr {
 	u8  alt_len;		/* size of new instruction(s), <= orig_len */
 };
 
+typedef void (*alternative_cb_t)(struct alt_instr *alt,
+				 __le32 *origptr, __le32 *updptr, int nr_inst);
+
 void __init apply_alternatives_all(void);
 void apply_alternatives(void *start, size_t length);
 
-#define ALTINSTR_ENTRY(feature)						      \
+#define ALTINSTR_ENTRY(feature,cb)					      \
 	" .word 661b - .\n"				/* label           */ \
+	" .if " __stringify(cb) " == 0\n"				      \
 	" .word 663f - .\n"				/* new instruction */ \
+	" .else\n"							      \
+	" .word " __stringify(cb) "- .\n"		/* callback */	      \
+	" .endif\n"							      \
 	" .hword " __stringify(feature) "\n"		/* feature bit     */ \
 	" .byte 662b-661b\n"				/* source len      */ \
 	" .byte 664f-663f\n"				/* replacement len */
@@ -42,15 +54,18 @@ void apply_alternatives(void *start, size_t length);
  * but most assemblers die if insn1 or insn2 have a .inst. This should
  * be fixed in a binutils release posterior to 2.25.51.0.2 (anything
  * containing commit 4e4d08cf7399b606 or c1baaddf8861).
+ *
+ * Alternatives with callbacks do not generate replacement instructions.
  */
-#define __ALTERNATIVE_CFG(oldinstr, newinstr, feature, cfg_enabled)	\
+#define __ALTERNATIVE_CFG(oldinstr, newinstr, feature, cfg_enabled, cb)	\
 	".if "__stringify(cfg_enabled)" == 1\n"				\
 	"661:\n\t"							\
 	oldinstr "\n"							\
 	"662:\n"							\
 	".pushsection .altinstructions,\"a\"\n"				\
-	ALTINSTR_ENTRY(feature)						\
+	ALTINSTR_ENTRY(feature,cb)					\
 	".popsection\n"							\
+	" .if " __stringify(cb) " == 0\n"				\
 	".pushsection .altinstr_replacement, \"a\"\n"			\
 	"663:\n\t"							\
 	newinstr "\n"							\
@@ -58,11 +73,17 @@ void apply_alternatives(void *start, size_t length);
 	".popsection\n\t"						\
 	".org	. - (664b-663b) + (662b-661b)\n\t"			\
 	".org	. - (662b-661b) + (664b-663b)\n"			\
+	".else\n\t"							\
+	"663:\n\t"							\
+	"664:\n\t"							\
+	".endif\n"							\
 	".endif\n"
 
 #define _ALTERNATIVE_CFG(oldinstr, newinstr, feature, cfg, ...)	\
-	__ALTERNATIVE_CFG(oldinstr, newinstr, feature, IS_ENABLED(cfg))
+	__ALTERNATIVE_CFG(oldinstr, newinstr, feature, IS_ENABLED(cfg), 0)
 
+#define ALTERNATIVE_CB(oldinstr, cb) \
+	__ALTERNATIVE_CFG(oldinstr, "NOT_AN_INSTRUCTION", ARM64_CB_PATCH, 1, cb)
 #else
 
 #include <asm/assembler.h>
@@ -90,24 +111,15 @@ void apply_alternatives(void *start, size_t length);
 .endm
 
 /*
- * Begin an alternative code sequence.
+ * Alternative sequences
  *
- * The code that follows this macro will be assembled and linked as
- * normal. There are no restrictions on this code.
- */
-.macro alternative_if_not cap
-	.pushsection .altinstructions, "a"
-	altinstruction_entry 661f, 663f, \cap, 662f-661f, 664f-663f
-	.popsection
-661:
-.endm
-
-/*
- * Provide the alternative code sequence.
+ * The code for the case where the capability is not present will be
+ * assembled and linked as normal. There are no restrictions on this
+ * code.
  *
- * The code that follows this macro is assembled into a special
- * section to be used for dynamic patching. Code that follows this
- * macro must:
+ * The code for the case where the capability is present will be
+ * assembled into a special section to be used for dynamic patching.
+ * Code for that case must:
  *
  * 1. Be exactly the same length (in bytes) as the default code
  *    sequence.
@@ -116,8 +128,46 @@ void apply_alternatives(void *start, size_t length);
  *    alternative sequence it is defined in (branches into an
  *    alternative sequence are not fixed up).
  */
+
+/*
+ * Begin an alternative code sequence.
+ */
+.macro alternative_if_not cap
+	.set .Lasm_alt_mode, 0
+	.pushsection .altinstructions, "a"
+	altinstruction_entry 661f, 663f, \cap, 662f-661f, 664f-663f
+	.popsection
+661:
+.endm
+
+.macro alternative_if cap
+	.set .Lasm_alt_mode, 1
+	.pushsection .altinstructions, "a"
+	altinstruction_entry 663f, 661f, \cap, 664f-663f, 662f-661f
+	.popsection
+	.pushsection .altinstr_replacement, "ax"
+	.align 2	/* So GAS knows label 661 is suitably aligned */
+661:
+.endm
+
+.macro alternative_cb cb
+	.set .Lasm_alt_mode, 0
+	.pushsection .altinstructions, "a"
+	altinstruction_entry 661f, \cb, ARM64_CB_PATCH, 662f-661f, 0
+	.popsection
+661:
+.endm
+
+/*
+ * Provide the other half of the alternative code sequence.
+ */
 .macro alternative_else
-662:	.pushsection .altinstr_replacement, "ax"
+662:
+	.if .Lasm_alt_mode==0
+	.pushsection .altinstr_replacement, "ax"
+	.else
+	.popsection
+	.endif
 663:
 .endm
 
@@ -125,9 +175,30 @@ void apply_alternatives(void *start, size_t length);
  * Complete an alternative code sequence.
  */
 .macro alternative_endif
-664:	.popsection
+664:
+	.if .Lasm_alt_mode==0
+	.popsection
+	.endif
 	.org	. - (664b-663b) + (662b-661b)
 	.org	. - (662b-661b) + (664b-663b)
+.endm
+
+/*
+ * Callback-based alternative epilogue
+ */
+.macro alternative_cb_end
+662:
+.endm
+
+/*
+ * Provides a trivial alternative or default sequence consisting solely
+ * of NOPs. The number of NOPs is chosen automatically to match the
+ * previous case.
+ */
+.macro alternative_else_nop_endif
+alternative_else
+	nops	(662b-661b) / AARCH64_INSN_SIZE
+alternative_endif
 .endm
 
 #define _ALTERNATIVE_CFG(insn1, insn2, cap, cfg, ...)	\

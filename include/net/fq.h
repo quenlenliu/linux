@@ -72,9 +72,12 @@ struct fq {
 	u32 flows_cnt;
 	u32 perturbation;
 	u32 limit;
+	u32 memory_limit;
+	u32 memory_usage;
 	u32 quantum;
 	u32 backlog;
 	u32 overlimit;
+	u32 overmemory;
 	u32 collisions;
 };
 
@@ -86,6 +89,13 @@ typedef void fq_skb_free_t(struct fq *,
 			   struct fq_tin *,
 			   struct fq_flow *,
 			   struct sk_buff *);
+
+/* Return %true to filter (drop) the frame. */
+typedef bool fq_skb_filter_t(struct fq *,
+			     struct fq_tin *,
+			     struct fq_flow *,
+			     struct sk_buff *,
+			     void *);
 
 typedef struct fq_flow *fq_flow_get_default_t(struct fq *,
 					      struct fq_tin *,

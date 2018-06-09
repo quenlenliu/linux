@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/x86_64/lib/csum-partial.c
  *
@@ -135,6 +136,7 @@ __wsum csum_partial(const void *buff, int len, __wsum sum)
 	return (__force __wsum)add32_with_carry(do_csum(buff, len),
 						(__force u32)sum);
 }
+EXPORT_SYMBOL(csum_partial);
 
 /*
  * this routine is used for miscellaneous IP-like checksums, mainly

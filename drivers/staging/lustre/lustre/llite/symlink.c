@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -35,7 +36,6 @@
 #include <linux/stat.h>
 #define DEBUG_SUBSYSTEM S_LLITE
 
-#include "../include/lustre_lite.h"
 #include "llite_internal.h"
 
 static int ll_readlink_internal(struct inode *inode,
@@ -73,24 +73,24 @@ static int ll_readlink_internal(struct inode *inode,
 	ll_finish_md_op_data(op_data);
 	if (rc) {
 		if (rc != -ENOENT)
-			CERROR("%s: inode "DFID": rc = %d\n",
+			CERROR("%s: inode " DFID ": rc = %d\n",
 			       ll_get_fsname(inode->i_sb, NULL, 0),
 			       PFID(ll_inode2fid(inode)), rc);
 		goto failed;
 	}
 
 	body = req_capsule_server_get(&(*request)->rq_pill, &RMF_MDT_BODY);
-	if ((body->valid & OBD_MD_LINKNAME) == 0) {
+	if ((body->mbo_valid & OBD_MD_LINKNAME) == 0) {
 		CERROR("OBD_MD_LINKNAME not set on reply\n");
 		rc = -EPROTO;
 		goto failed;
 	}
 
 	LASSERT(symlen != 0);
-	if (body->eadatasize != symlen) {
-		CERROR("%s: inode "DFID": symlink length %d not expected %d\n",
+	if (body->mbo_eadatasize != symlen) {
+		CERROR("%s: inode " DFID ": symlink length %d not expected %d\n",
 		       ll_get_fsname(inode->i_sb, NULL, 0),
-		       PFID(ll_inode2fid(inode)), body->eadatasize - 1,
+		       PFID(ll_inode2fid(inode)), body->mbo_eadatasize - 1,
 		       symlen - 1);
 		rc = -EPROTO;
 		goto failed;
@@ -130,6 +130,7 @@ static const char *ll_get_link(struct dentry *dentry,
 	struct ptlrpc_request *request = NULL;
 	int rc;
 	char *symname = NULL;
+
 	if (!dentry)
 		return ERR_PTR(-ECHILD);
 
@@ -150,13 +151,9 @@ static const char *ll_get_link(struct dentry *dentry,
 }
 
 const struct inode_operations ll_fast_symlink_inode_operations = {
-	.readlink	= generic_readlink,
 	.setattr	= ll_setattr,
 	.get_link	= ll_get_link,
 	.getattr	= ll_getattr,
 	.permission	= ll_inode_permission,
-	.setxattr	= ll_setxattr,
-	.getxattr	= ll_getxattr,
 	.listxattr	= ll_listxattr,
-	.removexattr	= ll_removexattr,
 };

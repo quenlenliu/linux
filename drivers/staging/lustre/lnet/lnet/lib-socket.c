@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -40,8 +41,8 @@
 #include <linux/syscalls.h>
 #include <net/sock.h>
 
-#include "../../include/linux/libcfs/libcfs.h"
-#include "../../include/linux/lnet/lib-lnet.h"
+#include <linux/libcfs/libcfs.h>
+#include <linux/lnet/lib-lnet.h>
 
 static int
 kernel_sock_unlocked_ioctl(struct file *filp, int cmd, unsigned long arg)
@@ -70,16 +71,12 @@ lnet_sock_ioctl(int cmd, unsigned long arg)
 	}
 
 	sock_filp = sock_alloc_file(sock, 0, NULL);
-	if (IS_ERR(sock_filp)) {
-		sock_release(sock);
-		rc = PTR_ERR(sock_filp);
-		goto out;
-	}
+	if (IS_ERR(sock_filp))
+		return PTR_ERR(sock_filp);
 
 	rc = kernel_sock_unlocked_ioctl(sock_filp, cmd, arg);
 
 	fput(sock_filp);
-out:
 	return rc;
 }
 
@@ -89,7 +86,7 @@ lnet_ipif_query(char *name, int *up, __u32 *ip, __u32 *mask)
 	struct ifreq ifr;
 	int nob;
 	int rc;
-	__u32 val;
+	__be32 val;
 
 	nob = strnlen(name, IFNAMSIZ);
 	if (nob == IFNAMSIZ) {
@@ -97,7 +94,7 @@ lnet_ipif_query(char *name, int *up, __u32 *ip, __u32 *mask)
 		return -EINVAL;
 	}
 
-	CLASSERT(sizeof(ifr.ifr_name) >= IFNAMSIZ);
+	BUILD_BUG_ON(sizeof(ifr.ifr_name) < IFNAMSIZ);
 
 	if (strlen(name) > sizeof(ifr.ifr_name) - 1)
 		return -E2BIG;
@@ -173,7 +170,7 @@ lnet_ipif_enumerate(char ***namesp)
 			      nalloc);
 		}
 
-		LIBCFS_ALLOC(ifr, nalloc * sizeof(*ifr));
+		ifr = kzalloc(nalloc * sizeof(*ifr), GFP_KERNEL);
 		if (!ifr) {
 			CERROR("ENOMEM enumerating up to %d interfaces\n",
 			       nalloc);
@@ -198,14 +195,14 @@ lnet_ipif_enumerate(char ***namesp)
 		if (nfound < nalloc || toobig)
 			break;
 
-		LIBCFS_FREE(ifr, nalloc * sizeof(*ifr));
+		kfree(ifr);
 		nalloc *= 2;
 	}
 
 	if (!nfound)
 		goto out1;
 
-	LIBCFS_ALLOC(names, nfound * sizeof(*names));
+	names = kzalloc(nfound * sizeof(*names), GFP_KERNEL);
 	if (!names) {
 		rc = -ENOMEM;
 		goto out1;
@@ -221,7 +218,7 @@ lnet_ipif_enumerate(char ***namesp)
 			goto out2;
 		}
 
-		LIBCFS_ALLOC(names[i], IFNAMSIZ);
+		names[i] = kmalloc(IFNAMSIZ, GFP_KERNEL);
 		if (!names[i]) {
 			rc = -ENOMEM;
 			goto out2;
@@ -238,7 +235,7 @@ out2:
 	if (rc < 0)
 		lnet_ipif_free_enumeration(names, nfound);
 out1:
-	LIBCFS_FREE(ifr, nalloc * sizeof(*ifr));
+	kfree(ifr);
 out0:
 	return rc;
 }
@@ -252,9 +249,9 @@ lnet_ipif_free_enumeration(char **names, int n)
 	LASSERT(n > 0);
 
 	for (i = 0; i < n && names[i]; i++)
-		LIBCFS_FREE(names[i], IFNAMSIZ);
+		kfree(names[i]);
 
-	LIBCFS_FREE(names, n * sizeof(*names));
+	kfree(names);
 }
 EXPORT_SYMBOL(lnet_ipif_free_enumeration);
 
@@ -265,21 +262,17 @@ lnet_sock_write(struct socket *sock, void *buffer, int nob, int timeout)
 	long jiffies_left = timeout * msecs_to_jiffies(MSEC_PER_SEC);
 	unsigned long then;
 	struct timeval tv;
+	struct kvec  iov = { .iov_base = buffer, .iov_len  = nob };
+	struct msghdr msg = {NULL,};
 
 	LASSERT(nob > 0);
 	/*
 	 * Caller may pass a zero timeout if she thinks the socket buffer is
 	 * empty enough to take the whole message immediately
 	 */
+	iov_iter_kvec(&msg.msg_iter, WRITE | ITER_KVEC, &iov, 1, nob);
 	for (;;) {
-		struct kvec  iov = {
-			.iov_base = buffer,
-			.iov_len  = nob
-		};
-		struct msghdr msg = {
-			.msg_flags      = !timeout ? MSG_DONTWAIT : 0
-		};
-
+		msg.msg_flags = !timeout ? MSG_DONTWAIT : 0;
 		if (timeout) {
 			/* Set send timeout to remaining time */
 			jiffies_to_timeval(jiffies_left, &tv);
@@ -296,9 +289,6 @@ lnet_sock_write(struct socket *sock, void *buffer, int nob, int timeout)
 		rc = kernel_sendmsg(sock, &msg, &iov, 1, nob);
 		jiffies_left -= jiffies - then;
 
-		if (rc == nob)
-			return 0;
-
 		if (rc < 0)
 			return rc;
 
@@ -307,11 +297,11 @@ lnet_sock_write(struct socket *sock, void *buffer, int nob, int timeout)
 			return -ECONNABORTED;
 		}
 
+		if (!msg_data_left(&msg))
+			break;
+
 		if (jiffies_left <= 0)
 			return -EAGAIN;
-
-		buffer = ((char *)buffer) + rc;
-		nob -= rc;
 	}
 	return 0;
 }
@@ -324,19 +314,20 @@ lnet_sock_read(struct socket *sock, void *buffer, int nob, int timeout)
 	long jiffies_left = timeout * msecs_to_jiffies(MSEC_PER_SEC);
 	unsigned long then;
 	struct timeval tv;
+	struct kvec  iov = {
+		.iov_base = buffer,
+		.iov_len  = nob
+	};
+	struct msghdr msg = {
+		.msg_flags = 0
+	};
 
 	LASSERT(nob > 0);
 	LASSERT(jiffies_left > 0);
 
-	for (;;) {
-		struct kvec  iov = {
-			.iov_base = buffer,
-			.iov_len  = nob
-		};
-		struct msghdr msg = {
-			.msg_flags = 0
-		};
+	iov_iter_kvec(&msg.msg_iter, READ | ITER_KVEC, &iov, 1, nob);
 
+	for (;;) {
 		/* Set receive timeout to remaining time */
 		jiffies_to_timeval(jiffies_left, &tv);
 		rc = kernel_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
@@ -348,7 +339,7 @@ lnet_sock_read(struct socket *sock, void *buffer, int nob, int timeout)
 		}
 
 		then = jiffies;
-		rc = kernel_recvmsg(sock, &msg, &iov, 1, nob, 0);
+		rc = sock_recvmsg(sock, &msg, 0);
 		jiffies_left -= jiffies - then;
 
 		if (rc < 0)
@@ -357,10 +348,7 @@ lnet_sock_read(struct socket *sock, void *buffer, int nob, int timeout)
 		if (!rc)
 			return -ECONNRESET;
 
-		buffer = ((char *)buffer) + rc;
-		nob -= rc;
-
-		if (!nob)
+		if (!msg_data_left(&msg))
 			return 0;
 
 		if (jiffies_left <= 0)
@@ -400,8 +388,10 @@ lnet_sock_create(struct socket **sockp, int *fatal, __u32 local_ip,
 		memset(&locaddr, 0, sizeof(locaddr));
 		locaddr.sin_family = AF_INET;
 		locaddr.sin_port = htons(local_port);
-		locaddr.sin_addr.s_addr = !local_ip ?
-					  INADDR_ANY : htonl(local_ip);
+		if (!local_ip)
+			locaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+		else
+			locaddr.sin_addr.s_addr = htonl(local_ip);
 
 		rc = kernel_bind(sock, (struct sockaddr *)&locaddr,
 				 sizeof(locaddr));
@@ -458,14 +448,13 @@ int
 lnet_sock_getaddr(struct socket *sock, bool remote, __u32 *ip, int *port)
 {
 	struct sockaddr_in sin;
-	int len = sizeof(sin);
 	int rc;
 
 	if (remote)
-		rc = kernel_getpeername(sock, (struct sockaddr *)&sin, &len);
+		rc = kernel_getpeername(sock, (struct sockaddr *)&sin);
 	else
-		rc = kernel_getsockname(sock, (struct sockaddr *)&sin, &len);
-	if (rc) {
+		rc = kernel_getsockname(sock, (struct sockaddr *)&sin);
+	if (rc < 0) {
 		CERROR("Error %d getting sock %s IP/port\n",
 		       rc, remote ? "peer" : "local");
 		return rc;
@@ -521,7 +510,7 @@ lnet_sock_listen(struct socket **sockp, __u32 local_ip, int local_port,
 int
 lnet_sock_accept(struct socket **newsockp, struct socket *sock)
 {
-	wait_queue_t wait;
+	wait_queue_entry_t wait;
 	struct socket *newsock;
 	int rc;
 
@@ -537,7 +526,7 @@ lnet_sock_accept(struct socket **newsockp, struct socket *sock)
 
 	newsock->ops = sock->ops;
 
-	rc = sock->ops->accept(sock, newsock, O_NONBLOCK);
+	rc = sock->ops->accept(sock, newsock, O_NONBLOCK, false);
 	if (rc == -EAGAIN) {
 		/* Nothing ready, so wait for activity */
 		init_waitqueue_entry(&wait, current);
@@ -545,7 +534,7 @@ lnet_sock_accept(struct socket **newsockp, struct socket *sock)
 		set_current_state(TASK_INTERRUPTIBLE);
 		schedule();
 		remove_wait_queue(sk_sleep(sock->sk), &wait);
-		rc = sock->ops->accept(sock, newsock, O_NONBLOCK);
+		rc = sock->ops->accept(sock, newsock, O_NONBLOCK, false);
 	}
 
 	if (rc)

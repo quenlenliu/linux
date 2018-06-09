@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * S390 Version
  *   Copyright IBM Corp. 2002, 2011
@@ -13,7 +14,7 @@
 #include <linux/init.h>
 #include <asm/processor.h>
 
-static int __s390_backtrace(void *data, unsigned long address)
+static int __s390_backtrace(void *data, unsigned long address, int reliable)
 {
 	unsigned int *depth = data;
 

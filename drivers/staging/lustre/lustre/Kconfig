@@ -1,6 +1,5 @@
 config LUSTRE_FS
 	tristate "Lustre file system client support"
-	depends on m && !MIPS && !XTENSA && !SUPERH
 	depends on LNET
 	select CRYPTO
 	select CRYPTO_CRC32
@@ -30,16 +29,6 @@ config LUSTRE_FS
 	  If unsure, say N.
 
 	  See also http://wiki.lustre.org/
-
-config LUSTRE_OBD_MAX_IOCTL_BUFFER
-	int "Lustre obd max ioctl buffer bytes (default 8KB)"
-	depends on LUSTRE_FS
-	default 8192
-	help
-	  This option defines the maximum size of buffer in bytes that user space
-	  applications can pass to Lustre kernel module through ioctl interface.
-
-	  If unsure, use default.
 
 config LUSTRE_DEBUG_EXPENSIVE_CHECK
 	bool "Enable Lustre DEBUG checks"

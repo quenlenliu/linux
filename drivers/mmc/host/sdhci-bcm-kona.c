@@ -186,7 +186,7 @@ static void sdhci_bcm_kona_init_74_clocks(struct sdhci_host *host,
 		udelay(740);
 }
 
-static struct sdhci_ops sdhci_bcm_kona_ops = {
+static const struct sdhci_ops sdhci_bcm_kona_ops = {
 	.set_clock = sdhci_set_clock,
 	.get_max_clock = sdhci_pltfm_clk_get_max_clock,
 	.get_timeout_clock = sdhci_pltfm_clk_get_max_clock,
@@ -197,7 +197,7 @@ static struct sdhci_ops sdhci_bcm_kona_ops = {
 	.card_event = sdhci_bcm_kona_card_event,
 };
 
-static struct sdhci_pltfm_data sdhci_pltfm_data_kona = {
+static const struct sdhci_pltfm_data sdhci_pltfm_data_kona = {
 	.ops    = &sdhci_bcm_kona_ops,
 	.quirks = SDHCI_QUIRK_NO_CARD_NO_RESET |
 		SDHCI_QUIRK_BROKEN_TIMEOUT_VAL | SDHCI_QUIRK_32BIT_DMA_ADDR |
@@ -253,12 +253,14 @@ static int sdhci_bcm_kona_probe(struct platform_device *pdev)
 		goto err_pltfm_free;
 	}
 
-	if (clk_set_rate(pltfm_priv->clk, host->mmc->f_max) != 0) {
+	ret = clk_set_rate(pltfm_priv->clk, host->mmc->f_max);
+	if (ret) {
 		dev_err(dev, "Failed to set rate core clock\n");
 		goto err_pltfm_free;
 	}
 
-	if (clk_prepare_enable(pltfm_priv->clk) != 0) {
+	ret = clk_prepare_enable(pltfm_priv->clk);
+	if (ret) {
 		dev_err(dev, "Failed to enable core clock\n");
 		goto err_pltfm_free;
 	}
@@ -282,10 +284,8 @@ static int sdhci_bcm_kona_probe(struct platform_device *pdev)
 	sdhci_bcm_kona_sd_init(host);
 
 	ret = sdhci_add_host(host);
-	if (ret) {
-		dev_err(dev, "Failed sdhci_add_host\n");
+	if (ret)
 		goto err_reset;
-	}
 
 	/* if device is eMMC, emulate card insert right here */
 	if (!mmc_card_is_removable(host->mmc)) {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/perf_event.h>
 #include <linux/types.h>
 
@@ -18,7 +19,7 @@ enum {
 	LBR_FORMAT_MAX_KNOWN    = LBR_FORMAT_TIME,
 };
 
-static enum {
+static const enum {
 	LBR_EIP_FLAGS		= 1,
 	LBR_TSX			= 2,
 } lbr_desc[LBR_FORMAT_MAX_KNOWN + 1] = {
@@ -109,6 +110,9 @@ enum {
 	X86_BR_ZERO_CALL	= 1 << 15,/* zero length call */
 	X86_BR_CALL_STACK	= 1 << 16,/* call stack */
 	X86_BR_IND_JMP		= 1 << 17,/* indirect jump */
+
+	X86_BR_TYPE_SAVE	= 1 << 18,/* indicate to save branch type */
+
 };
 
 #define X86_BR_PLM (X86_BR_USER | X86_BR_KERNEL)
@@ -287,7 +291,7 @@ inline u64 lbr_from_signext_quirk_wr(u64 val)
 /*
  * If quirk is needed, ensure sign extension is 61 bits:
  */
-u64 lbr_from_signext_quirk_rd(u64 val)
+static u64 lbr_from_signext_quirk_rd(u64 val)
 {
 	if (static_branch_unlikely(&lbr_from_quirk_key)) {
 		/*
@@ -383,6 +387,9 @@ void intel_pmu_lbr_sched_task(struct perf_event_context *ctx, bool sched_in)
 	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
 	struct x86_perf_task_context *task_ctx;
 
+	if (!cpuc->lbr_users)
+		return;
+
 	/*
 	 * If LBR callstack feature is enabled and the stack was saved when
 	 * the task was scheduled out, restore the stack. Otherwise flush
@@ -390,31 +397,21 @@ void intel_pmu_lbr_sched_task(struct perf_event_context *ctx, bool sched_in)
 	 */
 	task_ctx = ctx ? ctx->task_ctx_data : NULL;
 	if (task_ctx) {
-		if (sched_in) {
+		if (sched_in)
 			__intel_pmu_lbr_restore(task_ctx);
-			cpuc->lbr_context = ctx;
-		} else {
+		else
 			__intel_pmu_lbr_save(task_ctx);
-		}
 		return;
 	}
 
 	/*
-	 * When sampling the branck stack in system-wide, it may be
-	 * necessary to flush the stack on context switch. This happens
-	 * when the branch stack does not tag its entries with the pid
-	 * of the current task. Otherwise it becomes impossible to
-	 * associate a branch entry with a task. This ambiguity is more
-	 * likely to appear when the branch stack supports priv level
-	 * filtering and the user sets it to monitor only at the user
-	 * level (which could be a useful measurement in system-wide
-	 * mode). In that case, the risk is high of having a branch
-	 * stack with branch from multiple tasks.
- 	 */
-	if (sched_in) {
+	 * Since a context switch can flip the address space and LBR entries
+	 * are not tagged with an identifier, we need to wipe the LBR, even for
+	 * per-cpu events. You simply cannot resolve the branches from the old
+	 * address space.
+	 */
+	if (sched_in)
 		intel_pmu_lbr_reset();
-		cpuc->lbr_context = ctx;
-	}
 }
 
 static inline bool branch_user_callstack(unsigned br_sel)
@@ -422,7 +419,7 @@ static inline bool branch_user_callstack(unsigned br_sel)
 	return (br_sel & X86_BR_USER) && (br_sel & X86_BR_CALL_STACK);
 }
 
-void intel_pmu_lbr_enable(struct perf_event *event)
+void intel_pmu_lbr_add(struct perf_event *event)
 {
 	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
 	struct x86_perf_task_context *task_ctx;
@@ -430,27 +427,38 @@ void intel_pmu_lbr_enable(struct perf_event *event)
 	if (!x86_pmu.lbr_nr)
 		return;
 
-	/*
-	 * Reset the LBR stack if we changed task context to
-	 * avoid data leaks.
-	 */
-	if (event->ctx->task && cpuc->lbr_context != event->ctx) {
-		intel_pmu_lbr_reset();
-		cpuc->lbr_context = event->ctx;
-	}
 	cpuc->br_sel = event->hw.branch_reg.reg;
 
-	if (branch_user_callstack(cpuc->br_sel) && event->ctx &&
-					event->ctx->task_ctx_data) {
+	if (branch_user_callstack(cpuc->br_sel) && event->ctx->task_ctx_data) {
 		task_ctx = event->ctx->task_ctx_data;
 		task_ctx->lbr_callstack_users++;
 	}
 
-	cpuc->lbr_users++;
+	/*
+	 * Request pmu::sched_task() callback, which will fire inside the
+	 * regular perf event scheduling, so that call will:
+	 *
+	 *  - restore or wipe; when LBR-callstack,
+	 *  - wipe; otherwise,
+	 *
+	 * when this is from __perf_event_task_sched_in().
+	 *
+	 * However, if this is from perf_install_in_context(), no such callback
+	 * will follow and we'll need to reset the LBR here if this is the
+	 * first LBR event.
+	 *
+	 * The problem is, we cannot tell these cases apart... but we can
+	 * exclude the biggest chunk of cases by looking at
+	 * event->total_time_running. An event that has accrued runtime cannot
+	 * be 'new'. Conversely, a new event can get installed through the
+	 * context switch path for the first time.
+	 */
 	perf_sched_cb_inc(event->ctx->pmu);
+	if (!cpuc->lbr_users++ && !event->total_time_running)
+		intel_pmu_lbr_reset();
 }
 
-void intel_pmu_lbr_disable(struct perf_event *event)
+void intel_pmu_lbr_del(struct perf_event *event)
 {
 	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
 	struct x86_perf_task_context *task_ctx;
@@ -458,8 +466,8 @@ void intel_pmu_lbr_disable(struct perf_event *event)
 	if (!x86_pmu.lbr_nr)
 		return;
 
-	if (branch_user_callstack(cpuc->br_sel) && event->ctx &&
-					event->ctx->task_ctx_data) {
+	if (branch_user_callstack(cpuc->br_sel) &&
+	    event->ctx->task_ctx_data) {
 		task_ctx = event->ctx->task_ctx_data;
 		task_ctx->lbr_callstack_users--;
 	}
@@ -467,12 +475,6 @@ void intel_pmu_lbr_disable(struct perf_event *event)
 	cpuc->lbr_users--;
 	WARN_ON_ONCE(cpuc->lbr_users < 0);
 	perf_sched_cb_dec(event->ctx->pmu);
-
-	if (cpuc->enabled && !cpuc->lbr_users) {
-		__intel_pmu_lbr_disable();
-		/* avoid stale pointer */
-		cpuc->lbr_context = NULL;
-	}
 }
 
 void intel_pmu_lbr_enable_all(bool pmi)
@@ -513,6 +515,10 @@ static void intel_pmu_lbr_read_32(struct cpu_hw_events *cpuc)
 		cpuc->lbr_entries[i].to		= msr_lastbranch.to;
 		cpuc->lbr_entries[i].mispred	= 0;
 		cpuc->lbr_entries[i].predicted	= 0;
+		cpuc->lbr_entries[i].in_tx	= 0;
+		cpuc->lbr_entries[i].abort	= 0;
+		cpuc->lbr_entries[i].cycles	= 0;
+		cpuc->lbr_entries[i].type	= 0;
 		cpuc->lbr_entries[i].reserved	= 0;
 	}
 	cpuc->lbr_stack.nr = i;
@@ -599,6 +605,7 @@ static void intel_pmu_lbr_read_64(struct cpu_hw_events *cpuc)
 		cpuc->lbr_entries[out].in_tx	 = in_tx;
 		cpuc->lbr_entries[out].abort	 = abort;
 		cpuc->lbr_entries[out].cycles	 = cycles;
+		cpuc->lbr_entries[out].type	 = 0;
 		cpuc->lbr_entries[out].reserved	 = 0;
 		out++;
 	}
@@ -676,6 +683,10 @@ static int intel_pmu_setup_sw_lbr_filter(struct perf_event *event)
 
 	if (br_type & PERF_SAMPLE_BRANCH_CALL)
 		mask |= X86_BR_CALL | X86_BR_ZERO_CALL;
+
+	if (br_type & PERF_SAMPLE_BRANCH_TYPE_SAVE)
+		mask |= X86_BR_TYPE_SAVE;
+
 	/*
 	 * stash actual user request into reg, it may
 	 * be used by fixup code for some CPU
@@ -929,6 +940,43 @@ static int branch_type(unsigned long from, unsigned long to, int abort)
 	return ret;
 }
 
+#define X86_BR_TYPE_MAP_MAX	16
+
+static int branch_map[X86_BR_TYPE_MAP_MAX] = {
+	PERF_BR_CALL,		/* X86_BR_CALL */
+	PERF_BR_RET,		/* X86_BR_RET */
+	PERF_BR_SYSCALL,	/* X86_BR_SYSCALL */
+	PERF_BR_SYSRET,		/* X86_BR_SYSRET */
+	PERF_BR_UNKNOWN,	/* X86_BR_INT */
+	PERF_BR_UNKNOWN,	/* X86_BR_IRET */
+	PERF_BR_COND,		/* X86_BR_JCC */
+	PERF_BR_UNCOND,		/* X86_BR_JMP */
+	PERF_BR_UNKNOWN,	/* X86_BR_IRQ */
+	PERF_BR_IND_CALL,	/* X86_BR_IND_CALL */
+	PERF_BR_UNKNOWN,	/* X86_BR_ABORT */
+	PERF_BR_UNKNOWN,	/* X86_BR_IN_TX */
+	PERF_BR_UNKNOWN,	/* X86_BR_NO_TX */
+	PERF_BR_CALL,		/* X86_BR_ZERO_CALL */
+	PERF_BR_UNKNOWN,	/* X86_BR_CALL_STACK */
+	PERF_BR_IND,		/* X86_BR_IND_JMP */
+};
+
+static int
+common_branch_type(int type)
+{
+	int i;
+
+	type >>= 2; /* skip X86_BR_USER and X86_BR_KERNEL */
+
+	if (type) {
+		i = __ffs(type);
+		if (i < X86_BR_TYPE_MAP_MAX)
+			return branch_map[i];
+	}
+
+	return PERF_BR_UNKNOWN;
+}
+
 /*
  * implement actual branch filter based on user demand.
  * Hardware may not exactly satisfy that request, thus
@@ -945,7 +993,8 @@ intel_pmu_lbr_filter(struct cpu_hw_events *cpuc)
 	bool compress = false;
 
 	/* if sampling all branches, then nothing to filter */
-	if ((br_sel & X86_BR_ALL) == X86_BR_ALL)
+	if (((br_sel & X86_BR_ALL) == X86_BR_ALL) &&
+	    ((br_sel & X86_BR_TYPE_SAVE) != X86_BR_TYPE_SAVE))
 		return;
 
 	for (i = 0; i < cpuc->lbr_stack.nr; i++) {
@@ -966,6 +1015,9 @@ intel_pmu_lbr_filter(struct cpu_hw_events *cpuc)
 			cpuc->lbr_entries[i].from = 0;
 			compress = true;
 		}
+
+		if ((br_sel & X86_BR_TYPE_SAVE) == X86_BR_TYPE_SAVE)
+			cpuc->lbr_entries[i].type = common_branch_type(type);
 	}
 
 	if (!compress)
@@ -1134,7 +1186,7 @@ void __init intel_pmu_lbr_init_atom(void)
 	 * on PMU interrupt
 	 */
 	if (boot_cpu_data.x86_model == 28
-	    && boot_cpu_data.x86_mask < 10) {
+	    && boot_cpu_data.x86_stepping < 10) {
 		pr_cont("LBR disabled due to erratum");
 		return;
 	}

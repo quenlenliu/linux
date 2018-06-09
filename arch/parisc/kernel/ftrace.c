@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Code for tracing calls in Linux kernel.
  * Copyright (C) 2009-2016 Helge Deller <deller@gmx.de>
@@ -48,7 +49,7 @@ static void __hot prepare_ftrace_return(unsigned long *parent,
 		return;
 
         if (ftrace_push_return_trace(old, self_addr, &trace.depth,
-			0 ) == -EBUSY)
+				     0, NULL) == -EBUSY)
                 return;
 
 	/* activate parisc_return_to_handler() as return point */

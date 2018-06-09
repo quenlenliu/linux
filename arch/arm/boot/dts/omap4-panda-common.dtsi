@@ -8,14 +8,19 @@
 #include "elpida_ecb240abacn.dtsi"
 
 / {
-	memory {
+	memory@80000000 {
 		device_type = "memory";
 		reg = <0x80000000 0x40000000>; /* 1 GB */
+	};
+
+	chosen {
+		stdout-path = &uart3;
 	};
 
 	aliases {
 		display0 = &dvi0;
 		display1 = &hdmi0;
+		ethernet = &ethernet;
 	};
 
 	leds: leds {
@@ -84,6 +89,7 @@
 	hsusb1_phy: hsusb1_phy {
 		compatible = "usb-nop-xceiv";
 		reset-gpios = <&gpio2 30 GPIO_ACTIVE_LOW>;   /* gpio_62 */
+		#phy-cells = <0>;
 		vcc-supply = <&hsusb1_power>;
 		clocks = <&auxclk3_ck>;
 		clock-names = "main_clk";
@@ -266,7 +272,7 @@
 
 	dss_hdmi_pins: pinmux_dss_hdmi_pins {
 		pinctrl-single,pins = <
-			OMAP4_IOPAD(0x09a, PIN_INPUT_PULLUP | MUX_MODE0)	/* hdmi_cec.hdmi_cec */
+			OMAP4_IOPAD(0x09a, PIN_INPUT | MUX_MODE0)		/* hdmi_cec.hdmi_cec */
 			OMAP4_IOPAD(0x09c, PIN_INPUT_PULLUP | MUX_MODE0)	/* hdmi_scl.hdmi_scl */
 			OMAP4_IOPAD(0x09e, PIN_INPUT_PULLUP | MUX_MODE0)	/* hdmi_sda.hdmi_sda */
 		>;
@@ -446,6 +452,8 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&wl12xx_pins>;
 	vmmc-supply = <&wl12xx_vmmc>;
+	interrupts-extended = <&wakeupgen GIC_SPI 59 IRQ_TYPE_LEVEL_HIGH
+			       &omap4_pmx_core 0x10e>;
 	non-removable;
 	bus-width = <4>;
 	cap-power-off-card;
@@ -518,6 +526,21 @@
 
 &usbhsehci {
 	phys = <&hsusb1_phy>;
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	hub@1 {
+		compatible = "usb424,9514";
+		reg = <1>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		ethernet: usbether@1 {
+			compatible = "usb424,ec00";
+			reg = <1>;
+		};
+	};
 };
 
 &dss {

@@ -53,8 +53,7 @@ static const struct samsung_fixed_factor_clock exynos5440_fixed_factor_clks[] __
 /* mux clocks */
 static const struct samsung_mux_clock exynos5440_mux_clks[] __initconst = {
 	MUX(0, "mout_spi", mout_spi_p, MISC_DOUT1, 5, 1),
-	MUX_A(CLK_ARM_CLK, "arm_clk", mout_armclk_p,
-			CPU_CLK_STATUS, 0, 1, "armclk"),
+	MUX(CLK_ARM_CLK, "arm_clk", mout_armclk_p, CPU_CLK_STATUS, 0, 1),
 };
 
 /* divider clocks */
@@ -112,6 +111,18 @@ static struct notifier_block exynos5440_clk_restart_handler = {
 	.priority = 128,
 };
 
+static const struct samsung_pll_clock exynos5440_plls[] __initconst = {
+	PLL(pll_2550x, CLK_CPLLA, "cplla", "xtal", 0, 0x4c, NULL),
+	PLL(pll_2550x, CLK_CPLLB, "cpllb", "xtal", 0, 0x50, NULL),
+};
+
+/*
+ * Clock aliases for legacy clkdev look-up.
+ */
+static const struct samsung_clock_alias exynos5440_aliases[] __initconst = {
+	ALIAS(CLK_ARM_CLK, NULL, "armclk"),
+};
+
 /* register exynos5440 clocks */
 static void __init exynos5440_clk_init(struct device_node *np)
 {
@@ -129,8 +140,8 @@ static void __init exynos5440_clk_init(struct device_node *np)
 	samsung_clk_of_register_fixed_ext(ctx, exynos5440_fixed_rate_ext_clks,
 		ARRAY_SIZE(exynos5440_fixed_rate_ext_clks), ext_clk_match);
 
-	samsung_clk_register_pll2550x("cplla", "xtal", reg_base + 0x1c, 0x10);
-	samsung_clk_register_pll2550x("cpllb", "xtal", reg_base + 0x20, 0x10);
+	samsung_clk_register_pll(ctx, exynos5440_plls,
+			ARRAY_SIZE(exynos5440_plls), ctx->reg_base);
 
 	samsung_clk_register_fixed_rate(ctx, exynos5440_fixed_rate_clks,
 			ARRAY_SIZE(exynos5440_fixed_rate_clks));
@@ -142,6 +153,8 @@ static void __init exynos5440_clk_init(struct device_node *np)
 			ARRAY_SIZE(exynos5440_div_clks));
 	samsung_clk_register_gate(ctx, exynos5440_gate_clks,
 			ARRAY_SIZE(exynos5440_gate_clks));
+	samsung_clk_register_alias(ctx, exynos5440_aliases,
+						ARRAY_SIZE(exynos5440_aliases));
 
 	samsung_clk_of_add_provider(np, ctx);
 

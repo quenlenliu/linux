@@ -721,7 +721,7 @@ static const struct i2c_algorithm xiic_algorithm = {
 	.functionality = xiic_func,
 };
 
-static struct i2c_adapter xiic_adapter = {
+static const struct i2c_adapter xiic_adapter = {
 	.owner = THIS_MODULE,
 	.name = DRIVER_NAME,
 	.class = I2C_CLASS_DEPRECATED,
@@ -804,7 +804,6 @@ static int xiic_i2c_probe(struct platform_device *pdev)
 	/* add i2c adapter to i2c tree */
 	ret = i2c_add_adapter(&i2c->adap);
 	if (ret) {
-		dev_err(&pdev->dev, "Failed to add adapter\n");
 		xiic_deinit(i2c);
 		goto err_clk_dis;
 	}
@@ -852,20 +851,18 @@ static const struct of_device_id xiic_of_match[] = {
 MODULE_DEVICE_TABLE(of, xiic_of_match);
 #endif
 
-static int __maybe_unused cdns_i2c_runtime_suspend(struct device *dev)
+static int __maybe_unused xiic_i2c_runtime_suspend(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct xiic_i2c *i2c = platform_get_drvdata(pdev);
+	struct xiic_i2c *i2c = dev_get_drvdata(dev);
 
 	clk_disable(i2c->clk);
 
 	return 0;
 }
 
-static int __maybe_unused cdns_i2c_runtime_resume(struct device *dev)
+static int __maybe_unused xiic_i2c_runtime_resume(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct xiic_i2c *i2c = platform_get_drvdata(pdev);
+	struct xiic_i2c *i2c = dev_get_drvdata(dev);
 	int ret;
 
 	ret = clk_enable(i2c->clk);
@@ -878,8 +875,8 @@ static int __maybe_unused cdns_i2c_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops xiic_dev_pm_ops = {
-	SET_RUNTIME_PM_OPS(cdns_i2c_runtime_suspend,
-			   cdns_i2c_runtime_resume, NULL)
+	SET_RUNTIME_PM_OPS(xiic_i2c_runtime_suspend,
+			   xiic_i2c_runtime_resume, NULL)
 };
 static struct platform_driver xiic_i2c_driver = {
 	.probe   = xiic_i2c_probe,

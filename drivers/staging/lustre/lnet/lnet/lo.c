@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -29,10 +30,11 @@
  */
 
 #define DEBUG_SUBSYSTEM S_LNET
-#include "../../include/linux/lnet/lib-lnet.h"
+
+#include <linux/lnet/lib-lnet.h>
 
 static int
-lolnd_send(lnet_ni_t *ni, void *private, lnet_msg_t *lntmsg)
+lolnd_send(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg)
 {
 	LASSERT(!lntmsg->msg_routing);
 	LASSERT(!lntmsg->msg_target_is_router);
@@ -41,37 +43,24 @@ lolnd_send(lnet_ni_t *ni, void *private, lnet_msg_t *lntmsg)
 }
 
 static int
-lolnd_recv(lnet_ni_t *ni, void *private, lnet_msg_t *lntmsg,
-	   int delayed, unsigned int niov,
-	   struct kvec *iov, lnet_kiov_t *kiov,
-	   unsigned int offset, unsigned int mlen, unsigned int rlen)
+lolnd_recv(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg,
+	   int delayed, struct iov_iter *to, unsigned int rlen)
 {
-	lnet_msg_t *sendmsg = private;
+	struct lnet_msg *sendmsg = private;
 
 	if (lntmsg) {		   /* not discarding */
-		if (sendmsg->msg_iov) {
-			if (iov)
-				lnet_copy_iov2iov(niov, iov, offset,
-						  sendmsg->msg_niov,
-						  sendmsg->msg_iov,
-						  sendmsg->msg_offset, mlen);
-			else
-				lnet_copy_iov2kiov(niov, kiov, offset,
-						   sendmsg->msg_niov,
-						   sendmsg->msg_iov,
-						   sendmsg->msg_offset, mlen);
-		} else {
-			if (iov)
-				lnet_copy_kiov2iov(niov, iov, offset,
-						   sendmsg->msg_niov,
-						   sendmsg->msg_kiov,
-						   sendmsg->msg_offset, mlen);
-			else
-				lnet_copy_kiov2kiov(niov, kiov, offset,
-						    sendmsg->msg_niov,
-						    sendmsg->msg_kiov,
-						    sendmsg->msg_offset, mlen);
-		}
+		if (sendmsg->msg_iov)
+			lnet_copy_iov2iter(to,
+					   sendmsg->msg_niov,
+					   sendmsg->msg_iov,
+					   sendmsg->msg_offset,
+					   iov_iter_count(to));
+		else
+			lnet_copy_kiov2iter(to,
+					    sendmsg->msg_niov,
+					    sendmsg->msg_kiov,
+					    sendmsg->msg_offset,
+					    iov_iter_count(to));
 
 		lnet_finalize(ni, lntmsg, 0);
 	}
@@ -83,7 +72,7 @@ lolnd_recv(lnet_ni_t *ni, void *private, lnet_msg_t *lntmsg,
 static int lolnd_instanced;
 
 static void
-lolnd_shutdown(lnet_ni_t *ni)
+lolnd_shutdown(struct lnet_ni *ni)
 {
 	CDEBUG(D_NET, "shutdown\n");
 	LASSERT(lolnd_instanced);
@@ -92,7 +81,7 @@ lolnd_shutdown(lnet_ni_t *ni)
 }
 
 static int
-lolnd_startup(lnet_ni_t *ni)
+lolnd_startup(struct lnet_ni *ni)
 {
 	LASSERT(ni->ni_lnd == &the_lolnd);
 	LASSERT(!lolnd_instanced);
@@ -101,7 +90,7 @@ lolnd_startup(lnet_ni_t *ni)
 	return 0;
 }
 
-lnd_t the_lolnd = {
+struct lnet_lnd the_lolnd = {
 	/* .lnd_list       = */ {&the_lolnd.lnd_list, &the_lolnd.lnd_list},
 	/* .lnd_refcount   = */ 0,
 	/* .lnd_type       = */ LOLND,

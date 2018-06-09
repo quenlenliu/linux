@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015, 2016 Intel Corporation.
+ * Copyright(c) 2015-2017 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -49,8 +49,6 @@
 #include "hfi.h"
 #include "qp.h"
 #include "trace.h"
-
-#define SC_CTXT_PACKET_EGRESS_TIMEOUT 350 /* in chip cycles */
 
 #define SC(name) SEND_CTXT_##name
 /*
@@ -455,8 +453,8 @@ int init_send_contexts(struct hfi1_devdata *dd)
 	dd->hw_to_sw = kmalloc_array(TXE_NUM_CONTEXTS, sizeof(u8),
 					GFP_KERNEL);
 	dd->send_contexts = kcalloc(dd->num_send_contexts,
-					sizeof(struct send_context_info),
-					GFP_KERNEL);
+				    sizeof(struct send_context_info),
+				    GFP_KERNEL);
 	if (!dd->send_contexts || !dd->hw_to_sw) {
 		kfree(dd->hw_to_sw);
 		kfree(dd->send_contexts);
@@ -551,11 +549,11 @@ static inline u32 group_size(u32 group)
 }
 
 /*
- * Obtain the credit return addresses, kernel virtual and physical, for the
+ * Obtain the credit return addresses, kernel virtual and bus, for the
  * given sc.
  *
  * To understand this routine:
- * o va and pa are arrays of struct credit_return.  One for each physical
+ * o va and dma are arrays of struct credit_return.  One for each physical
  *   send context, per NUMA.
  * o Each send context always looks in its relative location in a struct
  *   credit_return for its credit return.
@@ -563,14 +561,14 @@ static inline u32 group_size(u32 group)
  *   with the same value.  Use the address of the first send context in the
  *   group.
  */
-static void cr_group_addresses(struct send_context *sc, dma_addr_t *pa)
+static void cr_group_addresses(struct send_context *sc, dma_addr_t *dma)
 {
 	u32 gc = group_context(sc->hw_context, sc->group);
 	u32 index = sc->hw_context & 0x7;
 
 	sc->hw_free = &sc->dd->cr_base[sc->node].va[gc].cr[index];
-	*pa = (unsigned long)
-	       &((struct credit_return *)sc->dd->cr_base[sc->node].pa)[gc];
+	*dma = (unsigned long)
+	       &((struct credit_return *)sc->dd->cr_base[sc->node].dma)[gc];
 }
 
 /*
@@ -668,19 +666,12 @@ void sc_set_cr_threshold(struct send_context *sc, u32 new_threshold)
 void set_pio_integrity(struct send_context *sc)
 {
 	struct hfi1_devdata *dd = sc->dd;
-	u64 reg = 0;
 	u32 hw_context = sc->hw_context;
 	int type = sc->type;
 
-	/*
-	 * No integrity checks if HFI1_CAP_NO_INTEGRITY is set, or if
-	 * we're snooping.
-	 */
-	if (likely(!HFI1_CAP_IS_KSET(NO_INTEGRITY)) &&
-	    dd->hfi1_snoop.mode_flag != HFI1_PORT_SNOOP_MODE)
-		reg = hfi1_pkt_default_send_ctxt_mask(dd, type);
-
-	write_kctxt_csr(dd, hw_context, SC(CHECK_ENABLE), reg);
+	write_kctxt_csr(dd, hw_context,
+			SC(CHECK_ENABLE),
+			hfi1_pkt_default_send_ctxt_mask(dd, type));
 }
 
 static u32 get_buffers_allocated(struct send_context *sc)
@@ -710,7 +701,7 @@ struct send_context *sc_alloc(struct hfi1_devdata *dd, int type,
 {
 	struct send_context_info *sci;
 	struct send_context *sc = NULL;
-	dma_addr_t pa;
+	dma_addr_t dma;
 	unsigned long flags;
 	u64 reg;
 	u32 thresh;
@@ -763,8 +754,9 @@ struct send_context *sc_alloc(struct hfi1_devdata *dd, int type,
 
 	sc->sw_index = sw_index;
 	sc->hw_context = hw_context;
-	cr_group_addresses(sc, &pa);
+	cr_group_addresses(sc, &dma);
 	sc->credits = sci->credits;
+	sc->size = sc->credits * PIO_BLOCK_SIZE;
 
 /* PIO Send Memory Address details */
 #define PIO_ADDR_CONTEXT_MASK 0xfful
@@ -805,7 +797,7 @@ struct send_context *sc_alloc(struct hfi1_devdata *dd, int type,
 			((u64)opval << SC(CHECK_OPCODE_VALUE_SHIFT)));
 
 	/* set up credit return */
-	reg = pa & SC(CREDIT_RETURN_ADDR_ADDRESS_SMASK);
+	reg = dma & SC(CREDIT_RETURN_ADDR_ADDRESS_SMASK);
 	write_kctxt_csr(dd, hw_context, SC(CREDIT_RETURN_ADDR), reg);
 
 	/*
@@ -862,8 +854,9 @@ struct send_context *sc_alloc(struct hfi1_devdata *dd, int type,
 		 * so head == tail can mean empty.
 		 */
 		sc->sr_size = sci->credits + 1;
-		sc->sr = kzalloc_node(sizeof(union pio_shadow_ring) *
-				sc->sr_size, GFP_KERNEL, numa);
+		sc->sr = kcalloc_node(sc->sr_size,
+				      sizeof(union pio_shadow_ring),
+				      GFP_KERNEL, numa);
 		if (!sc->sr) {
 			sc_free(sc);
 			return NULL;
@@ -966,15 +959,40 @@ void sc_disable(struct send_context *sc)
 }
 
 /* return SendEgressCtxtStatus.PacketOccupancy */
-#define packet_occupancy(r) \
-	(((r) & SEND_EGRESS_CTXT_STATUS_CTXT_EGRESS_PACKET_OCCUPANCY_SMASK)\
-	>> SEND_EGRESS_CTXT_STATUS_CTXT_EGRESS_PACKET_OCCUPANCY_SHIFT)
+static u64 packet_occupancy(u64 reg)
+{
+	return (reg &
+		SEND_EGRESS_CTXT_STATUS_CTXT_EGRESS_PACKET_OCCUPANCY_SMASK)
+		>> SEND_EGRESS_CTXT_STATUS_CTXT_EGRESS_PACKET_OCCUPANCY_SHIFT;
+}
 
 /* is egress halted on the context? */
-#define egress_halted(r) \
-	((r) & SEND_EGRESS_CTXT_STATUS_CTXT_EGRESS_HALT_STATUS_SMASK)
+static bool egress_halted(u64 reg)
+{
+	return !!(reg & SEND_EGRESS_CTXT_STATUS_CTXT_EGRESS_HALT_STATUS_SMASK);
+}
 
-/* wait for packet egress, optionally pause for credit return  */
+/* is the send context halted? */
+static bool is_sc_halted(struct hfi1_devdata *dd, u32 hw_context)
+{
+	return !!(read_kctxt_csr(dd, hw_context, SC(STATUS)) &
+		  SC(STATUS_CTXT_HALTED_SMASK));
+}
+
+/**
+ * sc_wait_for_packet_egress
+ * @sc: valid send context
+ * @pause: wait for credit return
+ *
+ * Wait for packet egress, optionally pause for credit return
+ *
+ * Egress halt and Context halt are not necessarily the same thing, so
+ * check for both.
+ *
+ * NOTE: The context halt bit may not be set immediately.  Because of this,
+ * it is necessary to check the SW SFC_HALTED bit (set in the IRQ) and the HW
+ * context bit to determine if the context is halted.
+ */
 static void sc_wait_for_packet_egress(struct send_context *sc, int pause)
 {
 	struct hfi1_devdata *dd = sc->dd;
@@ -986,8 +1004,9 @@ static void sc_wait_for_packet_egress(struct send_context *sc, int pause)
 		reg_prev = reg;
 		reg = read_csr(dd, sc->hw_context * 8 +
 			       SEND_EGRESS_CTXT_STATUS);
-		/* done if egress is stopped */
-		if (egress_halted(reg))
+		/* done if any halt bits, SW or HW are set */
+		if (sc->flags & SCF_HALTED ||
+		    is_sc_halted(dd, sc->hw_context) || egress_halted(reg))
 			break;
 		reg = packet_occupancy(reg);
 		if (reg == 0)
@@ -1001,7 +1020,7 @@ static void sc_wait_for_packet_egress(struct send_context *sc, int pause)
 				   "%s: context %u(%u) timeout waiting for packets to egress, remaining count %u, bouncing link\n",
 				   __func__, sc->sw_index,
 				   sc->hw_context, (u32)reg);
-			queue_work(dd->pport->hfi1_wq,
+			queue_work(dd->pport->link_wq,
 				   &dd->pport->link_bounce_work);
 			break;
 		}
@@ -1249,6 +1268,7 @@ int sc_enable(struct send_context *sc)
 	sc->free = 0;
 	sc->alloc_free = 0;
 	sc->fill = 0;
+	sc->fill_wrap = 0;
 	sc->sr_head = 0;
 	sc->sr_tail = 0;
 	sc->flags = 0;
@@ -1392,7 +1412,7 @@ struct pio_buf *sc_buffer_alloc(struct send_context *sc, u32 dw_len,
 	unsigned long flags;
 	unsigned long avail;
 	unsigned long blocks = dwords_to_blocks(dw_len);
-	unsigned long start_fill;
+	u32 fill_wrap;
 	int trycount = 0;
 	u32 head, next;
 
@@ -1411,16 +1431,14 @@ retry:
 			goto done;
 		}
 		/* copy from receiver cache line and recalculate */
-		sc->alloc_free = ACCESS_ONCE(sc->free);
+		sc->alloc_free = READ_ONCE(sc->free);
 		avail =
 			(unsigned long)sc->credits -
 			(sc->fill - sc->alloc_free);
 		if (blocks > avail) {
 			/* still no room, actively update */
-			spin_unlock_irqrestore(&sc->alloc_lock, flags);
 			sc_release_update(sc);
-			spin_lock_irqsave(&sc->alloc_lock, flags);
-			sc->alloc_free = ACCESS_ONCE(sc->free);
+			sc->alloc_free = READ_ONCE(sc->free);
 			trycount++;
 			goto retry;
 		}
@@ -1435,8 +1453,11 @@ retry:
 	head = sc->sr_head;
 
 	/* "allocate" the buffer */
-	start_fill = sc->fill;
 	sc->fill += blocks;
+	fill_wrap = sc->fill_wrap;
+	sc->fill_wrap += blocks;
+	if (sc->fill_wrap >= sc->credits)
+		sc->fill_wrap = sc->fill_wrap - sc->credits;
 
 	/*
 	 * Fill the parts that the releaser looks at before moving the head.
@@ -1465,11 +1486,8 @@ retry:
 	spin_unlock_irqrestore(&sc->alloc_lock, flags);
 
 	/* finish filling in the buffer outside the lock */
-	pbuf->start = sc->base_addr + ((start_fill % sc->credits)
-							* PIO_BLOCK_SIZE);
-	pbuf->size = sc->credits * PIO_BLOCK_SIZE;
-	pbuf->end = sc->base_addr + pbuf->size;
-	pbuf->block_count = blocks;
+	pbuf->start = sc->base_addr + fill_wrap * PIO_BLOCK_SIZE;
+	pbuf->end = sc->base_addr + sc->size;
 	pbuf->qw_written = 0;
 	pbuf->carry_bytes = 0;
 	pbuf->carry.val64 = 0;
@@ -1558,7 +1576,8 @@ static void sc_piobufavail(struct send_context *sc)
 	struct rvt_qp *qp;
 	struct hfi1_qp_priv *priv;
 	unsigned long flags;
-	unsigned i, n = 0;
+	uint i, n = 0, max_idx = 0;
+	u8 max_starved_cnt = 0;
 
 	if (dd->send_contexts[sc->sw_index].type != SC_KERNEL &&
 	    dd->send_contexts[sc->sw_index].type != SC_VL15)
@@ -1580,6 +1599,8 @@ static void sc_piobufavail(struct send_context *sc)
 		qp = iowait_to_qp(wait);
 		priv = qp->priv;
 		list_del_init(&priv->s_iowait.list);
+		priv->s_iowait.lock = NULL;
+		iowait_starve_find_max(wait, &max_starved_cnt, n, &max_idx);
 		/* refcount held until actual wake up */
 		qps[n++] = qp;
 	}
@@ -1594,9 +1615,14 @@ static void sc_piobufavail(struct send_context *sc)
 	}
 	write_sequnlock_irqrestore(&dev->iowait_lock, flags);
 
-	for (i = 0; i < n; i++)
-		hfi1_qp_wakeup(qps[i],
+	/* Wake up the most starved one first */
+	if (n)
+		hfi1_qp_wakeup(qps[max_idx],
 			       RVT_S_WAIT_PIO | RVT_S_WAIT_PIO_DRAIN);
+	for (i = 0; i < n; i++)
+		if (i != max_idx)
+			hfi1_qp_wakeup(qps[i],
+				       RVT_S_WAIT_PIO | RVT_S_WAIT_PIO_DRAIN);
 }
 
 /* translate a send credit update to a bit code of reasons */
@@ -1649,7 +1675,7 @@ void sc_release_update(struct send_context *sc)
 
 	/* call sent buffer callbacks */
 	code = -1;				/* code not yet set */
-	head = ACCESS_ONCE(sc->sr_head);	/* snapshot the head */
+	head = READ_ONCE(sc->sr_head);	/* snapshot the head */
 	tail = sc->sr_tail;
 	while (head != tail) {
 		pbuf = &sc->sr[tail].pbuf;
@@ -1957,9 +1983,9 @@ int init_pervl_scs(struct hfi1_devdata *dd)
 	hfi1_init_ctxt(dd->vld[15].sc);
 	dd->vld[15].mtu = enum_to_mtu(OPA_MTU_2048);
 
-	dd->kernel_send_context = kzalloc_node(dd->num_send_contexts *
-					sizeof(struct send_context *),
-					GFP_KERNEL, dd->node);
+	dd->kernel_send_context = kcalloc_node(dd->num_send_contexts,
+					       sizeof(struct send_context *),
+					       GFP_KERNEL, dd->node);
 	if (!dd->kernel_send_context)
 		goto freesc15;
 
@@ -2035,36 +2061,24 @@ freesc15:
 int init_credit_return(struct hfi1_devdata *dd)
 {
 	int ret;
-	int num_numa;
 	int i;
 
-	num_numa = num_online_nodes();
-	/* enforce the expectation that the numas are compact */
-	for (i = 0; i < num_numa; i++) {
-		if (!node_online(i)) {
-			dd_dev_err(dd, "NUMA nodes are not compact\n");
-			ret = -EINVAL;
-			goto done;
-		}
-	}
-
 	dd->cr_base = kcalloc(
-		num_numa,
+		node_affinity.num_possible_nodes,
 		sizeof(struct credit_return_base),
 		GFP_KERNEL);
 	if (!dd->cr_base) {
-		dd_dev_err(dd, "Unable to allocate credit return base\n");
 		ret = -ENOMEM;
 		goto done;
 	}
-	for (i = 0; i < num_numa; i++) {
+	for_each_node_with_cpus(i) {
 		int bytes = TXE_NUM_CONTEXTS * sizeof(struct credit_return);
 
 		set_dev_node(&dd->pcidev->dev, i);
 		dd->cr_base[i].va = dma_zalloc_coherent(
 					&dd->pcidev->dev,
 					bytes,
-					&dd->cr_base[i].pa,
+					&dd->cr_base[i].dma,
 					GFP_KERNEL);
 		if (!dd->cr_base[i].va) {
 			set_dev_node(&dd->pcidev->dev, dd->node);
@@ -2084,20 +2098,17 @@ done:
 
 void free_credit_return(struct hfi1_devdata *dd)
 {
-	int num_numa;
 	int i;
 
 	if (!dd->cr_base)
 		return;
-
-	num_numa = num_online_nodes();
-	for (i = 0; i < num_numa; i++) {
+	for (i = 0; i < node_affinity.num_possible_nodes; i++) {
 		if (dd->cr_base[i].va) {
 			dma_free_coherent(&dd->pcidev->dev,
 					  TXE_NUM_CONTEXTS *
 					  sizeof(struct credit_return),
 					  dd->cr_base[i].va,
-					  dd->cr_base[i].pa);
+					  dd->cr_base[i].dma);
 		}
 	}
 	kfree(dd->cr_base);

@@ -1,15 +1,8 @@
-/* Copyright (c) 2015-2016, The Linux Foundation. All rights reserved.
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Copyright (c) 2015-2016, The Linux Foundation. All rights reserved.
  *
  * Description: CoreSight System Trace Macrocell driver
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  *
  * Initial implementation by Pratik Patel
  * (C) 2014-2015 Pratik Patel <pratikp@codeaurora.org>
@@ -105,10 +98,12 @@ module_param_named(
 /**
  * struct channel_space - central management entity for extended ports
  * @base:		memory mapped base address where channels start.
+ * @phys:		physical base address of channel region.
  * @guaraneed:		is the channel delivery guaranteed.
  */
 struct channel_space {
 	void __iomem		*base;
+	phys_addr_t		phys;
 	unsigned long		*guaranteed;
 };
 
@@ -196,7 +191,7 @@ static void stm_enable_hw(struct stm_drvdata *drvdata)
 }
 
 static int stm_enable(struct coresight_device *csdev,
-		      struct perf_event_attr *attr, u32 mode)
+		      struct perf_event *event, u32 mode)
 {
 	u32 val;
 	struct stm_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
@@ -258,7 +253,8 @@ static void stm_disable_hw(struct stm_drvdata *drvdata)
 		stm_hwevent_disable_hw(drvdata);
 }
 
-static void stm_disable(struct coresight_device *csdev)
+static void stm_disable(struct coresight_device *csdev,
+			struct perf_event *event)
 {
 	struct stm_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
 
@@ -273,7 +269,7 @@ static void stm_disable(struct coresight_device *csdev)
 		spin_unlock(&drvdata->spinlock);
 
 		/* Wait until the engine has completely stopped */
-		coresight_timeout(drvdata, STMTCSR, STMTCSR_BUSY_BIT, 0);
+		coresight_timeout(drvdata->base, STMTCSR, STMTCSR_BUSY_BIT, 0);
 
 		pm_runtime_put(drvdata->dev);
 
@@ -304,7 +300,8 @@ static inline bool stm_addr_unaligned(const void *addr, u8 write_bytes)
 	return ((unsigned long)addr & (write_bytes - 1));
 }
 
-static void stm_send(void *addr, const void *data, u32 size, u8 write_bytes)
+static void stm_send(void __iomem *addr, const void *data,
+		     u32 size, u8 write_bytes)
 {
 	u8 paload[8];
 
@@ -353,7 +350,24 @@ static void stm_generic_unlink(struct stm_data *stm_data,
 	if (!drvdata || !drvdata->csdev)
 		return;
 
-	stm_disable(drvdata->csdev);
+	coresight_disable(drvdata->csdev);
+}
+
+static phys_addr_t
+stm_mmio_addr(struct stm_data *stm_data, unsigned int master,
+	      unsigned int channel, unsigned int nr_chans)
+{
+	struct stm_drvdata *drvdata = container_of(stm_data,
+						   struct stm_drvdata, stm);
+	phys_addr_t addr;
+
+	addr = drvdata->chs.phys + channel * BYTES_PER_CHANNEL;
+
+	if (offset_in_page(addr) ||
+	    offset_in_page(nr_chans * BYTES_PER_CHANNEL))
+		return 0;
+
+	return addr;
 }
 
 static long stm_generic_set_options(struct stm_data *stm_data,
@@ -386,7 +400,7 @@ static long stm_generic_set_options(struct stm_data *stm_data,
 	return 0;
 }
 
-static ssize_t stm_generic_packet(struct stm_data *stm_data,
+static ssize_t notrace stm_generic_packet(struct stm_data *stm_data,
 				  unsigned int master,
 				  unsigned int channel,
 				  unsigned int packet,
@@ -394,17 +408,17 @@ static ssize_t stm_generic_packet(struct stm_data *stm_data,
 				  unsigned int size,
 				  const unsigned char *payload)
 {
-	unsigned long ch_addr;
+	void __iomem *ch_addr;
 	struct stm_drvdata *drvdata = container_of(stm_data,
 						   struct stm_drvdata, stm);
 
 	if (!(drvdata && local_read(&drvdata->mode)))
-		return 0;
+		return -EACCES;
 
 	if (channel >= drvdata->numsp)
-		return 0;
+		return -EINVAL;
 
-	ch_addr = (unsigned long)stm_channel_addr(drvdata, channel);
+	ch_addr = stm_channel_addr(drvdata, channel);
 
 	flags = (flags == STP_PACKET_TIMESTAMPED) ? STM_FLAG_TIMESTAMPED : 0;
 	flags |= test_bit(channel, drvdata->chs.guaranteed) ?
@@ -417,20 +431,20 @@ static ssize_t stm_generic_packet(struct stm_data *stm_data,
 
 	switch (packet) {
 	case STP_PACKET_FLAG:
-		ch_addr |= stm_channel_off(STM_PKT_TYPE_FLAG, flags);
+		ch_addr += stm_channel_off(STM_PKT_TYPE_FLAG, flags);
 
 		/*
 		 * The generic STM core sets a size of '0' on flag packets.
 		 * As such send a flag packet of size '1' and tell the
 		 * core we did so.
 		 */
-		stm_send((void *)ch_addr, payload, 1, drvdata->write_bytes);
+		stm_send(ch_addr, payload, 1, drvdata->write_bytes);
 		size = 1;
 		break;
 
 	case STP_PACKET_DATA:
-		ch_addr |= stm_channel_off(STM_PKT_TYPE_DATA, flags);
-		stm_send((void *)ch_addr, payload, size,
+		ch_addr += stm_channel_off(STM_PKT_TYPE_DATA, flags);
+		stm_send(ch_addr, payload, size,
 				drvdata->write_bytes);
 		break;
 
@@ -615,21 +629,21 @@ static ssize_t traceid_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(traceid);
 
-#define coresight_stm_simple_func(name, offset)	\
-	coresight_simple_func(struct stm_drvdata, name, offset)
+#define coresight_stm_reg(name, offset)	\
+	coresight_simple_reg32(struct stm_drvdata, name, offset)
 
-coresight_stm_simple_func(tcsr, STMTCSR);
-coresight_stm_simple_func(tsfreqr, STMTSFREQR);
-coresight_stm_simple_func(syncr, STMSYNCR);
-coresight_stm_simple_func(sper, STMSPER);
-coresight_stm_simple_func(spter, STMSPTER);
-coresight_stm_simple_func(privmaskr, STMPRIVMASKR);
-coresight_stm_simple_func(spscr, STMSPSCR);
-coresight_stm_simple_func(spmscr, STMSPMSCR);
-coresight_stm_simple_func(spfeat1r, STMSPFEAT1R);
-coresight_stm_simple_func(spfeat2r, STMSPFEAT2R);
-coresight_stm_simple_func(spfeat3r, STMSPFEAT3R);
-coresight_stm_simple_func(devid, CORESIGHT_DEVID);
+coresight_stm_reg(tcsr, STMTCSR);
+coresight_stm_reg(tsfreqr, STMTSFREQR);
+coresight_stm_reg(syncr, STMSYNCR);
+coresight_stm_reg(sper, STMSPER);
+coresight_stm_reg(spter, STMSPTER);
+coresight_stm_reg(privmaskr, STMPRIVMASKR);
+coresight_stm_reg(spscr, STMSPSCR);
+coresight_stm_reg(spmscr, STMSPMSCR);
+coresight_stm_reg(spfeat1r, STMSPFEAT1R);
+coresight_stm_reg(spfeat2r, STMSPFEAT2R);
+coresight_stm_reg(spfeat3r, STMSPFEAT3R);
+coresight_stm_reg(devid, CORESIGHT_DEVID);
 
 static struct attribute *coresight_stm_attrs[] = {
 	&dev_attr_hwevent_enable.attr,
@@ -761,7 +775,9 @@ static void stm_init_generic_data(struct stm_drvdata *drvdata)
 	drvdata->stm.sw_end = 1;
 	drvdata->stm.hw_override = true;
 	drvdata->stm.sw_nchannels = drvdata->numsp;
+	drvdata->stm.sw_mmiosz = BYTES_PER_CHANNEL;
 	drvdata->stm.packet = stm_generic_packet;
+	drvdata->stm.mmio_addr = stm_mmio_addr;
 	drvdata->stm.link = stm_generic_link;
 	drvdata->stm.unlink = stm_generic_unlink;
 	drvdata->stm.set_options = stm_generic_set_options;
@@ -778,7 +794,7 @@ static int stm_probe(struct amba_device *adev, const struct amba_id *id)
 	struct resource *res = &adev->res;
 	struct resource ch_res;
 	size_t res_size, bitmap_size;
-	struct coresight_desc *desc;
+	struct coresight_desc desc = { 0 };
 	struct device_node *np = adev->dev.of_node;
 
 	if (np) {
@@ -808,6 +824,7 @@ static int stm_probe(struct amba_device *adev, const struct amba_id *id)
 	ret = stm_get_resource_byname(np, "stm-stimulus-base", &ch_res);
 	if (ret)
 		return ret;
+	drvdata->chs.phys = ch_res.start;
 
 	base = devm_ioremap_resource(dev, &ch_res);
 	if (IS_ERR(base))
@@ -843,19 +860,13 @@ static int stm_probe(struct amba_device *adev, const struct amba_id *id)
 		return -EPROBE_DEFER;
 	}
 
-	desc = devm_kzalloc(dev, sizeof(*desc), GFP_KERNEL);
-	if (!desc) {
-		ret = -ENOMEM;
-		goto stm_unregister;
-	}
-
-	desc->type = CORESIGHT_DEV_TYPE_SOURCE;
-	desc->subtype.source_subtype = CORESIGHT_DEV_SUBTYPE_SOURCE_SOFTWARE;
-	desc->ops = &stm_cs_ops;
-	desc->pdata = pdata;
-	desc->dev = dev;
-	desc->groups = coresight_stm_groups;
-	drvdata->csdev = coresight_register(desc);
+	desc.type = CORESIGHT_DEV_TYPE_SOURCE;
+	desc.subtype.source_subtype = CORESIGHT_DEV_SUBTYPE_SOURCE_SOFTWARE;
+	desc.ops = &stm_cs_ops;
+	desc.pdata = pdata;
+	desc.dev = dev;
+	desc.groups = coresight_stm_groups;
+	drvdata->csdev = coresight_register(&desc);
 	if (IS_ERR(drvdata->csdev)) {
 		ret = PTR_ERR(drvdata->csdev);
 		goto stm_unregister;
@@ -897,11 +908,16 @@ static const struct dev_pm_ops stm_dev_pm_ops = {
 	SET_RUNTIME_PM_OPS(stm_runtime_suspend, stm_runtime_resume, NULL)
 };
 
-static struct amba_id stm_ids[] = {
+static const struct amba_id stm_ids[] = {
 	{
-		.id     = 0x0003b962,
-		.mask   = 0x0003ffff,
+		.id     = 0x000bb962,
+		.mask   = 0x000fffff,
 		.data	= "STM32",
+	},
+	{
+		.id	= 0x000bb963,
+		.mask	= 0x000fffff,
+		.data	= "STM500",
 	},
 	{ 0, 0},
 };

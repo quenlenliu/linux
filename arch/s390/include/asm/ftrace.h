@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_S390_FTRACE_H
 #define _ASM_S390_FTRACE_H
 
@@ -12,9 +13,7 @@
 
 #ifndef __ASSEMBLY__
 
-unsigned long return_address(int depth);
-
-#define ftrace_return_address(n) return_address(n)
+#define ftrace_return_address(n) __builtin_return_address(n)
 
 void _mcount(void);
 void ftrace_caller(void);

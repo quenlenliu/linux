@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -46,12 +47,12 @@
  */
 
 #define DEBUG_SUBSYSTEM S_LDLM
-#include "../../include/linux/libcfs/libcfs.h"
-#include "../include/lustre_dlm.h"
-#include "../include/obd_support.h"
-#include "../include/obd.h"
-#include "../include/obd_class.h"
-#include "../include/lustre_lib.h"
+#include <linux/libcfs/libcfs.h>
+#include <lustre_dlm.h>
+#include <obd_support.h>
+#include <obd.h>
+#include <obd_class.h>
+#include <lustre_lib.h>
 #include "ldlm_internal.h"
 
 /* When a lock is cancelled by a client, the KMS may undergo change if this
@@ -63,7 +64,6 @@
 __u64 ldlm_extent_shift_kms(struct ldlm_lock *lock, __u64 old_kms)
 {
 	struct ldlm_resource *res = lock->l_resource;
-	struct list_head *tmp;
 	struct ldlm_lock *lck;
 	__u64 kms = 0;
 
@@ -73,8 +73,7 @@ __u64 ldlm_extent_shift_kms(struct ldlm_lock *lock, __u64 old_kms)
 	 */
 	ldlm_set_kms_ignore(lock);
 
-	list_for_each(tmp, &res->lr_granted) {
-		lck = list_entry(tmp, struct ldlm_lock, l_res_link);
+	list_for_each_entry(lck, &res->lr_granted, l_res_link) {
 
 		if (ldlm_is_kms_ignore(lck))
 			continue;
@@ -162,7 +161,7 @@ void ldlm_extent_add_lock(struct ldlm_resource *res,
 	struct interval_node *found, **root;
 	struct ldlm_interval *node;
 	struct ldlm_extent *extent;
-	int idx;
+	int idx, rc;
 
 	LASSERT(lock->l_granted_mode == lock->l_req_mode);
 
@@ -176,7 +175,8 @@ void ldlm_extent_add_lock(struct ldlm_resource *res,
 
 	/* node extent initialize */
 	extent = &lock->l_policy_data.l_extent;
-	interval_set(&node->li_node, extent->start, extent->end);
+	rc = interval_set(&node->li_node, extent->start, extent->end);
+	LASSERT(!rc);
 
 	root = &res->lr_itree[idx].lit_root;
 	found = interval_insert(&node->li_node, root);
@@ -193,6 +193,27 @@ void ldlm_extent_add_lock(struct ldlm_resource *res,
 	 * add the locks into grant list, for debug purpose, ..
 	 */
 	ldlm_resource_add_lock(res, &res->lr_granted, lock);
+
+	if (OBD_FAIL_CHECK(OBD_FAIL_LDLM_GRANT_CHECK)) {
+		struct ldlm_lock *lck;
+
+		list_for_each_entry_reverse(lck, &res->lr_granted,
+					    l_res_link) {
+			if (lck == lock)
+				continue;
+			if (lockmode_compat(lck->l_granted_mode,
+					    lock->l_granted_mode))
+				continue;
+			if (ldlm_extent_overlap(&lck->l_req_extent,
+						&lock->l_req_extent)) {
+				CDEBUG(D_ERROR,
+				       "granting conflicting lock %p %p\n",
+				       lck, lock);
+				ldlm_resource_dump(D_ERROR, res);
+				LBUG();
+			}
+		}
+	}
 }
 
 /** Remove cancelled lock from resource interval tree. */
@@ -220,17 +241,16 @@ void ldlm_extent_unlink_lock(struct ldlm_lock *lock)
 	}
 }
 
-void ldlm_extent_policy_wire_to_local(const ldlm_wire_policy_data_t *wpolicy,
-				     ldlm_policy_data_t *lpolicy)
+void ldlm_extent_policy_wire_to_local(const union ldlm_wire_policy_data *wpolicy,
+				      union ldlm_policy_data *lpolicy)
 {
-	memset(lpolicy, 0, sizeof(*lpolicy));
 	lpolicy->l_extent.start = wpolicy->l_extent.start;
 	lpolicy->l_extent.end = wpolicy->l_extent.end;
 	lpolicy->l_extent.gid = wpolicy->l_extent.gid;
 }
 
-void ldlm_extent_policy_local_to_wire(const ldlm_policy_data_t *lpolicy,
-				     ldlm_wire_policy_data_t *wpolicy)
+void ldlm_extent_policy_local_to_wire(const union ldlm_policy_data *lpolicy,
+				      union ldlm_wire_policy_data *wpolicy)
 {
 	memset(wpolicy, 0, sizeof(*wpolicy));
 	wpolicy->l_extent.start = lpolicy->l_extent.start;

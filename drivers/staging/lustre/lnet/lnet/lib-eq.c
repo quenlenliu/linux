@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -35,7 +36,8 @@
  */
 
 #define DEBUG_SUBSYSTEM S_LNET
-#include "../../include/linux/lnet/lib-lnet.h"
+
+#include <linux/lnet/lib-lnet.h>
 
 /**
  * Create an event queue that has room for \a count number of events.
@@ -64,9 +66,9 @@
  */
 int
 LNetEQAlloc(unsigned int count, lnet_eq_handler_t callback,
-	    lnet_handle_eq_t *handle)
+	    struct lnet_handle_eq *handle)
 {
-	lnet_eq_t *eq;
+	struct lnet_eq *eq;
 
 	LASSERT(the_lnet.ln_refcount > 0);
 
@@ -88,12 +90,13 @@ LNetEQAlloc(unsigned int count, lnet_eq_handler_t callback,
 	if (!count && callback == LNET_EQ_HANDLER_NONE)
 		return -EINVAL;
 
-	eq = lnet_eq_alloc();
+	eq = kzalloc(sizeof(*eq), GFP_NOFS);
 	if (!eq)
 		return -ENOMEM;
 
 	if (count) {
-		LIBCFS_ALLOC(eq->eq_events, count * sizeof(lnet_event_t));
+		eq->eq_events = kvmalloc_array(count, sizeof(struct lnet_event),
+					       GFP_KERNEL | __GFP_ZERO);
 		if (!eq->eq_events)
 			goto failed;
 		/*
@@ -130,13 +133,12 @@ LNetEQAlloc(unsigned int count, lnet_eq_handler_t callback,
 	return 0;
 
 failed:
-	if (eq->eq_events)
-		LIBCFS_FREE(eq->eq_events, count * sizeof(lnet_event_t));
+	kvfree(eq->eq_events);
 
 	if (eq->eq_refs)
 		cfs_percpt_free(eq->eq_refs);
 
-	lnet_eq_free(eq);
+	kfree(eq);
 	return -ENOMEM;
 }
 EXPORT_SYMBOL(LNetEQAlloc);
@@ -152,10 +154,10 @@ EXPORT_SYMBOL(LNetEQAlloc);
  * \retval -EBUSY  If the EQ is still in use by some MDs.
  */
 int
-LNetEQFree(lnet_handle_eq_t eqh)
+LNetEQFree(struct lnet_handle_eq eqh)
 {
 	struct lnet_eq *eq;
-	lnet_event_t *events = NULL;
+	struct lnet_event *events = NULL;
 	int **refs = NULL;
 	int *ref;
 	int rc = 0;
@@ -195,13 +197,12 @@ LNetEQFree(lnet_handle_eq_t eqh)
 
 	lnet_res_lh_invalidate(&eq->eq_lh);
 	list_del(&eq->eq_list);
-	lnet_eq_free(eq);
+	kfree(eq);
  out:
 	lnet_eq_wait_unlock();
 	lnet_res_unlock(LNET_LOCK_EX);
 
-	if (events)
-		LIBCFS_FREE(events, size * sizeof(lnet_event_t));
+	kvfree(events);
 	if (refs)
 		cfs_percpt_free(refs);
 
@@ -210,7 +211,7 @@ LNetEQFree(lnet_handle_eq_t eqh)
 EXPORT_SYMBOL(LNetEQFree);
 
 void
-lnet_eq_enqueue_event(lnet_eq_t *eq, lnet_event_t *ev)
+lnet_eq_enqueue_event(struct lnet_eq *eq, struct lnet_event *ev)
 {
 	/* MUST called with resource lock hold but w/o lnet_eq_wait_lock */
 	int index;
@@ -239,10 +240,10 @@ lnet_eq_enqueue_event(lnet_eq_t *eq, lnet_event_t *ev)
 }
 
 static int
-lnet_eq_dequeue_event(lnet_eq_t *eq, lnet_event_t *ev)
+lnet_eq_dequeue_event(struct lnet_eq *eq, struct lnet_event *ev)
 {
 	int new_index = eq->eq_deq_seq & (eq->eq_size - 1);
-	lnet_event_t *new_event = &eq->eq_events[new_index];
+	struct lnet_event *new_event = &eq->eq_events[new_index];
 	int rc;
 
 	/* must called with lnet_eq_wait_lock hold */
@@ -307,19 +308,19 @@ lnet_eq_dequeue_event(lnet_eq_t *eq, lnet_event_t *ev)
  */
 
 static int
-lnet_eq_wait_locked(int *timeout_ms)
+lnet_eq_wait_locked(int *timeout_ms, long state)
 __must_hold(&the_lnet.ln_eq_wait_lock)
 {
 	int tms = *timeout_ms;
 	int wait;
-	wait_queue_t wl;
+	wait_queue_entry_t wl;
 	unsigned long now;
 
 	if (!tms)
 		return -ENXIO; /* don't want to wait and no new event */
 
 	init_waitqueue_entry(&wl, current);
-	set_current_state(TASK_INTERRUPTIBLE);
+	set_current_state(state);
 	add_wait_queue(&the_lnet.ln_eq_waitq, &wl);
 
 	lnet_eq_wait_unlock();
@@ -358,6 +359,7 @@ __must_hold(&the_lnet.ln_eq_wait_lock)
  * \param timeout_ms Time in milliseconds to wait for an event to occur on
  * one of the EQs. The constant LNET_TIME_FOREVER can be used to indicate an
  * infinite timeout.
+ * \param interruptible, if true, use TASK_INTERRUPTIBLE, else TASK_NOLOAD
  * \param event,which On successful return (1 or -EOVERFLOW), \a event will
  * hold the next event in the EQs, and \a which will contain the index of the
  * EQ from which the event was taken.
@@ -370,8 +372,9 @@ __must_hold(&the_lnet.ln_eq_wait_lock)
  * \retval -ENOENT    If there's an invalid handle in \a eventqs.
  */
 int
-LNetEQPoll(lnet_handle_eq_t *eventqs, int neq, int timeout_ms,
-	   lnet_event_t *event, int *which)
+LNetEQPoll(struct lnet_handle_eq *eventqs, int neq, int timeout_ms,
+	   int interruptible,
+	   struct lnet_event *event, int *which)
 {
 	int wait = 1;
 	int rc;
@@ -386,7 +389,7 @@ LNetEQPoll(lnet_handle_eq_t *eventqs, int neq, int timeout_ms,
 
 	for (;;) {
 		for (i = 0; i < neq; i++) {
-			lnet_eq_t *eq = lnet_handle2eq(&eventqs[i]);
+			struct lnet_eq *eq = lnet_handle2eq(&eventqs[i]);
 
 			if (!eq) {
 				lnet_eq_wait_unlock();
@@ -411,7 +414,9 @@ LNetEQPoll(lnet_handle_eq_t *eventqs, int neq, int timeout_ms,
 		 *  0 : don't want to wait anymore, but might have new event
 		 *      so need to call dequeue again
 		 */
-		wait = lnet_eq_wait_locked(&timeout_ms);
+		wait = lnet_eq_wait_locked(&timeout_ms,
+					   interruptible ? TASK_INTERRUPTIBLE
+					   : TASK_NOLOAD);
 		if (wait < 0) /* no new event */
 			break;
 	}

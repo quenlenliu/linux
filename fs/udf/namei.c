@@ -164,7 +164,8 @@ static struct fileIdentDesc *udf_find_entry(struct inode *dir,
 {
 	struct fileIdentDesc *fi = NULL;
 	loff_t f_pos;
-	int block, flen;
+	udf_pblk_t block;
+	int flen;
 	unsigned char *fname = NULL, *copy_name = NULL;
 	unsigned char *nameptr;
 	uint8_t lfi;
@@ -352,7 +353,7 @@ static struct fileIdentDesc *udf_add_entry(struct inode *dir,
 	int nfidlen;
 	uint8_t lfi;
 	uint16_t liu;
-	int block;
+	udf_pblk_t block;
 	struct kernel_lb_addr eloc;
 	uint32_t elen = 0;
 	sector_t offset;
@@ -616,13 +617,12 @@ static int udf_add_nondir(struct dentry *dentry, struct inode *inode)
 	*(__le32 *)((struct allocDescImpUse *)cfi.icb.impUse)->impUse =
 		cpu_to_le32(iinfo->i_unique & 0x00000000FFFFFFFFUL);
 	udf_write_fi(dir, &cfi, fi, &fibh, NULL, NULL);
-	dir->i_ctime = dir->i_mtime = current_fs_time(dir->i_sb);
+	dir->i_ctime = dir->i_mtime = current_time(dir);
 	mark_inode_dirty(dir);
 	if (fibh.sbh != fibh.ebh)
 		brelse(fibh.ebh);
 	brelse(fibh.sbh);
-	unlock_new_inode(inode);
-	d_instantiate(dentry, inode);
+	d_instantiate_new(dentry, inode);
 
 	return 0;
 }
@@ -730,10 +730,9 @@ static int udf_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	cfi.fileCharacteristics |= FID_FILE_CHAR_DIRECTORY;
 	udf_write_fi(dir, &cfi, fi, &fibh, NULL, NULL);
 	inc_nlink(dir);
-	dir->i_ctime = dir->i_mtime = current_fs_time(dir->i_sb);
+	dir->i_ctime = dir->i_mtime = current_time(dir);
 	mark_inode_dirty(dir);
-	unlock_new_inode(inode);
-	d_instantiate(dentry, inode);
+	d_instantiate_new(dentry, inode);
 	if (fibh.sbh != fibh.ebh)
 		brelse(fibh.ebh);
 	brelse(fibh.sbh);
@@ -749,7 +748,7 @@ static int empty_dir(struct inode *dir)
 	struct udf_fileident_bh fibh;
 	loff_t f_pos;
 	loff_t size = udf_ext0_offset(dir) + dir->i_size;
-	int block;
+	udf_pblk_t block;
 	struct kernel_lb_addr eloc;
 	uint32_t elen;
 	sector_t offset;
@@ -839,13 +838,13 @@ static int udf_rmdir(struct inode *dir, struct dentry *dentry)
 	if (retval)
 		goto end_rmdir;
 	if (inode->i_nlink != 2)
-		udf_warn(inode->i_sb, "empty directory has nlink != 2 (%d)\n",
+		udf_warn(inode->i_sb, "empty directory has nlink != 2 (%u)\n",
 			 inode->i_nlink);
 	clear_nlink(inode);
 	inode->i_size = 0;
 	inode_dec_link_count(dir);
 	inode->i_ctime = dir->i_ctime = dir->i_mtime =
-						current_fs_time(dir->i_sb);
+						current_time(inode);
 	mark_inode_dirty(dir);
 
 end_rmdir:
@@ -881,14 +880,14 @@ static int udf_unlink(struct inode *dir, struct dentry *dentry)
 		goto end_unlink;
 
 	if (!inode->i_nlink) {
-		udf_debug("Deleting nonexistent file (%lu), %d\n",
+		udf_debug("Deleting nonexistent file (%lu), %u\n",
 			  inode->i_ino, inode->i_nlink);
 		set_nlink(inode, 1);
 	}
 	retval = udf_delete_entry(dir, fi, &fibh, &cfi);
 	if (retval)
 		goto end_unlink;
-	dir->i_ctime = dir->i_mtime = current_fs_time(dir->i_sb);
+	dir->i_ctime = dir->i_mtime = current_time(dir);
 	mark_inode_dirty(dir);
 	inode_dec_link_count(inode);
 	inode->i_ctime = dir->i_ctime;
@@ -906,14 +905,14 @@ out:
 static int udf_symlink(struct inode *dir, struct dentry *dentry,
 		       const char *symname)
 {
-	struct inode *inode = udf_new_inode(dir, S_IFLNK | S_IRWXUGO);
+	struct inode *inode = udf_new_inode(dir, S_IFLNK | 0777);
 	struct pathComponent *pc;
 	const char *compstart;
 	struct extent_position epos = {};
 	int eoffset, elen = 0;
 	uint8_t *ea;
 	int err;
-	int block;
+	udf_pblk_t block;
 	unsigned char *name = NULL;
 	int namelen;
 	struct udf_inode_info *iinfo;
@@ -931,7 +930,7 @@ static int udf_symlink(struct inode *dir, struct dentry *dentry,
 	}
 
 	inode->i_data.a_ops = &udf_symlink_aops;
-	inode->i_op = &page_symlink_inode_operations;
+	inode->i_op = &udf_symlink_inode_operations;
 	inode_nohighmem(inode);
 
 	if (iinfo->i_alloc_type != ICBTAG_FLAG_AD_IN_ICB) {
@@ -1079,9 +1078,9 @@ static int udf_link(struct dentry *old_dentry, struct inode *dir,
 		brelse(fibh.ebh);
 	brelse(fibh.sbh);
 	inc_nlink(inode);
-	inode->i_ctime = current_fs_time(inode->i_sb);
+	inode->i_ctime = current_time(inode);
 	mark_inode_dirty(inode);
-	dir->i_ctime = dir->i_mtime = current_fs_time(dir->i_sb);
+	dir->i_ctime = dir->i_mtime = current_time(dir);
 	mark_inode_dirty(dir);
 	ihold(inode);
 	d_instantiate(dentry, inode);
@@ -1093,7 +1092,8 @@ static int udf_link(struct dentry *old_dentry, struct inode *dir,
  * higher-level routines.
  */
 static int udf_rename(struct inode *old_dir, struct dentry *old_dentry,
-		      struct inode *new_dir, struct dentry *new_dentry)
+		      struct inode *new_dir, struct dentry *new_dentry,
+		      unsigned int flags)
 {
 	struct inode *old_inode = d_inode(old_dentry);
 	struct inode *new_inode = d_inode(new_dentry);
@@ -1104,6 +1104,9 @@ static int udf_rename(struct inode *old_dir, struct dentry *old_dentry,
 	int retval = -ENOENT;
 	struct kernel_lb_addr tloc;
 	struct udf_inode_info *old_iinfo = UDF_I(old_inode);
+
+	if (flags & ~RENAME_NOREPLACE)
+		return -EINVAL;
 
 	ofi = udf_find_entry(old_dir, &old_dentry->d_name, &ofibh, &ocfi);
 	if (IS_ERR(ofi)) {
@@ -1172,7 +1175,7 @@ static int udf_rename(struct inode *old_dir, struct dentry *old_dentry,
 	 * Like most other Unix systems, set the ctime for inodes on a
 	 * rename.
 	 */
-	old_inode->i_ctime = current_fs_time(old_inode->i_sb);
+	old_inode->i_ctime = current_time(old_inode);
 	mark_inode_dirty(old_inode);
 
 	/*
@@ -1180,7 +1183,7 @@ static int udf_rename(struct inode *old_dir, struct dentry *old_dentry,
 	 */
 	ncfi.fileVersionNum = ocfi.fileVersionNum;
 	ncfi.fileCharacteristics = ocfi.fileCharacteristics;
-	memcpy(&(ncfi.icb), &(ocfi.icb), sizeof(struct long_ad));
+	memcpy(&(ncfi.icb), &(ocfi.icb), sizeof(ocfi.icb));
 	udf_write_fi(new_dir, &ncfi, nfi, &nfibh, NULL, NULL);
 
 	/* The old fid may have moved - find it again */
@@ -1188,11 +1191,11 @@ static int udf_rename(struct inode *old_dir, struct dentry *old_dentry,
 	udf_delete_entry(old_dir, ofi, &ofibh, &ocfi);
 
 	if (new_inode) {
-		new_inode->i_ctime = current_fs_time(new_inode->i_sb);
+		new_inode->i_ctime = current_time(new_inode);
 		inode_dec_link_count(new_inode);
 	}
-	old_dir->i_ctime = old_dir->i_mtime = current_fs_time(old_dir->i_sb);
-	new_dir->i_ctime = new_dir->i_mtime = current_fs_time(new_dir->i_sb);
+	old_dir->i_ctime = old_dir->i_mtime = current_time(old_dir);
+	new_dir->i_ctime = new_dir->i_mtime = current_time(new_dir);
 	mark_inode_dirty(old_dir);
 	mark_inode_dirty(new_dir);
 

@@ -25,7 +25,7 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/slab.h>
-#include "dvb_frontend.h"
+#include <media/dvb_frontend.h>
 #include "lgs8gl5.h"
 
 
@@ -376,7 +376,7 @@ lgs8gl5_release(struct dvb_frontend *fe)
 }
 
 
-static struct dvb_frontend_ops lgs8gl5_ops;
+static const struct dvb_frontend_ops lgs8gl5_ops;
 
 
 struct dvb_frontend*
@@ -412,7 +412,7 @@ error:
 EXPORT_SYMBOL(lgs8gl5_attach);
 
 
-static struct dvb_frontend_ops lgs8gl5_ops = {
+static const struct dvb_frontend_ops lgs8gl5_ops = {
 	.delsys = { SYS_DTMB },
 	.info = {
 		.name			= "Legend Silicon LGS-8GL5 DMB-TH",

@@ -403,16 +403,14 @@ static void
 txx9dmac_descriptor_complete(struct txx9dmac_chan *dc,
 			     struct txx9dmac_desc *desc)
 {
-	dma_async_tx_callback callback;
-	void *param;
+	struct dmaengine_desc_callback cb;
 	struct dma_async_tx_descriptor *txd = &desc->txd;
 
 	dev_vdbg(chan2dev(&dc->chan), "descriptor %u %p complete\n",
 		 txd->cookie, desc);
 
 	dma_cookie_complete(txd);
-	callback = txd->callback;
-	param = txd->callback_param;
+	dmaengine_desc_get_callback(txd, &cb);
 
 	txx9dmac_sync_desc_for_cpu(dc, desc);
 	list_splice_init(&desc->tx_list, &dc->free_list);
@@ -423,8 +421,7 @@ txx9dmac_descriptor_complete(struct txx9dmac_chan *dc,
 	 * The API requires that no submissions are done from a
 	 * callback, so we don't need to drop the lock here
 	 */
-	if (callback)
-		callback(param);
+	dmaengine_desc_callback_invoke(&cb, NULL);
 	dma_run_dependencies(txd);
 }
 
@@ -1247,8 +1244,7 @@ static void txx9dmac_shutdown(struct platform_device *pdev)
 
 static int txx9dmac_suspend_noirq(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct txx9dmac_dev *ddev = platform_get_drvdata(pdev);
+	struct txx9dmac_dev *ddev = dev_get_drvdata(dev);
 
 	txx9dmac_off(ddev);
 	return 0;
@@ -1256,9 +1252,8 @@ static int txx9dmac_suspend_noirq(struct device *dev)
 
 static int txx9dmac_resume_noirq(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct txx9dmac_dev *ddev = platform_get_drvdata(pdev);
-	struct txx9dmac_platform_data *pdata = dev_get_platdata(&pdev->dev);
+	struct txx9dmac_dev *ddev = dev_get_drvdata(dev);
+	struct txx9dmac_platform_data *pdata = dev_get_platdata(dev);
 	u32 mcr;
 
 	mcr = TXX9_DMA_MCR_MSTEN | MCR_LE;

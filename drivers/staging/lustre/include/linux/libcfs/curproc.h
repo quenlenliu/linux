@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -53,32 +54,23 @@
 #define current_pid()		(current->pid)
 #define current_comm()		(current->comm)
 
-typedef __u32 cfs_cap_t;
+typedef u32 cfs_cap_t;
 
-#define CFS_CAP_CHOWN		   0
-#define CFS_CAP_DAC_OVERRIDE	    1
-#define CFS_CAP_DAC_READ_SEARCH	 2
-#define CFS_CAP_FOWNER		  3
-#define CFS_CAP_FSETID		  4
-#define CFS_CAP_LINUX_IMMUTABLE	 9
-#define CFS_CAP_SYS_ADMIN	      21
-#define CFS_CAP_SYS_BOOT	       23
-#define CFS_CAP_SYS_RESOURCE	   24
+#define CFS_CAP_FS_MASK (BIT(CAP_CHOWN) |		\
+			 BIT(CAP_DAC_OVERRIDE) |	\
+			 BIT(CAP_DAC_READ_SEARCH) |	\
+			 BIT(CAP_FOWNER) |		\
+			 BIT(CAP_FSETID) |		\
+			 BIT(CAP_LINUX_IMMUTABLE) | \
+			 BIT(CAP_SYS_ADMIN) |	\
+			 BIT(CAP_SYS_BOOT) |	\
+			 BIT(CAP_SYS_RESOURCE))
 
-#define CFS_CAP_FS_MASK ((1 << CFS_CAP_CHOWN) |		 \
-			 (1 << CFS_CAP_DAC_OVERRIDE) |	  \
-			 (1 << CFS_CAP_DAC_READ_SEARCH) |       \
-			 (1 << CFS_CAP_FOWNER) |		\
-			 (1 << CFS_CAP_FSETID) |	       \
-			 (1 << CFS_CAP_LINUX_IMMUTABLE) |       \
-			 (1 << CFS_CAP_SYS_ADMIN) |	     \
-			 (1 << CFS_CAP_SYS_BOOT) |	      \
-			 (1 << CFS_CAP_SYS_RESOURCE))
-
-void cfs_cap_raise(cfs_cap_t cap);
-void cfs_cap_lower(cfs_cap_t cap);
-int cfs_cap_raised(cfs_cap_t cap);
-cfs_cap_t cfs_curproc_cap_pack(void);
+static inline cfs_cap_t cfs_curproc_cap_pack(void)
+{
+	/* cfs_cap_t is only the first word of kernel_cap_t */
+	return (cfs_cap_t)(current_cap().cap[0]);
+}
 
 /* __LIBCFS_CURPROC_H__ */
 #endif

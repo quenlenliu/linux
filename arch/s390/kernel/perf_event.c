@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Performance event support for s390x
  *
  *  Copyright IBM Corp. 2012, 2013
  *  Author(s): Hendrik Brueckner <brueckner@linux.vnet.ibm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License (version 2 only)
- * as published by the Free Software Foundation.
  */
 #define KMSG_COMPONENT	"perf"
 #define pr_fmt(fmt)	KMSG_COMPONENT ": " fmt
@@ -222,7 +219,7 @@ static int __init service_level_perf_register(void)
 }
 arch_initcall(service_level_perf_register);
 
-static int __perf_callchain_kernel(void *data, unsigned long address)
+static int __perf_callchain_kernel(void *data, unsigned long address, int reliable)
 {
 	struct perf_callchain_entry_ctx *entry = data;
 
@@ -245,6 +242,5 @@ ssize_t cpumf_events_sysfs_show(struct device *dev,
 	struct perf_pmu_events_attr *pmu_attr;
 
 	pmu_attr = container_of(attr, struct perf_pmu_events_attr, attr);
-	return sprintf(page, "event=0x%04llx,name=%s\n",
-		       pmu_attr->id, attr->attr.name);
+	return sprintf(page, "event=0x%04llx\n", pmu_attr->id);
 }

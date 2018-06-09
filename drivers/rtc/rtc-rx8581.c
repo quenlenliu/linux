@@ -164,11 +164,7 @@ static int rx8581_get_datetime(struct i2c_client *client, struct rtc_time *tm)
 		tm->tm_sec, tm->tm_min, tm->tm_hour,
 		tm->tm_mday, tm->tm_mon, tm->tm_year, tm->tm_wday);
 
-	err = rtc_valid_tm(tm);
-	if (err < 0)
-		dev_err(&client->dev, "retrieved date/time is not valid.\n");
-
-	return err;
+	return 0;
 }
 
 static int rx8581_set_datetime(struct i2c_client *client, struct rtc_time *tm)
@@ -308,9 +304,16 @@ static const struct i2c_device_id rx8581_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, rx8581_id);
 
+static const struct of_device_id rx8581_of_match[] = {
+	{ .compatible = "epson,rx8581" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, rx8581_of_match);
+
 static struct i2c_driver rx8581_driver = {
 	.driver		= {
 		.name	= "rtc-rx8581",
+		.of_match_table = of_match_ptr(rx8581_of_match),
 	},
 	.probe		= rx8581_probe,
 	.id_table	= rx8581_id,

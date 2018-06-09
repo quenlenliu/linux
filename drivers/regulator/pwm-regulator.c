@@ -10,7 +10,6 @@
  * published by the Free Software Foundation.
  */
 
-#include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/err.h>
@@ -123,8 +122,7 @@ static int pwm_regulator_enable(struct regulator_dev *dev)
 {
 	struct pwm_regulator_data *drvdata = rdev_get_drvdata(dev);
 
-	if (drvdata->enb_gpio)
-		gpiod_set_value_cansleep(drvdata->enb_gpio, 1);
+	gpiod_set_value_cansleep(drvdata->enb_gpio, 1);
 
 	return pwm_enable(drvdata->pwm);
 }
@@ -135,8 +133,7 @@ static int pwm_regulator_disable(struct regulator_dev *dev)
 
 	pwm_disable(drvdata->pwm);
 
-	if (drvdata->enb_gpio)
-		gpiod_set_value_cansleep(drvdata->enb_gpio, 0);
+	gpiod_set_value_cansleep(drvdata->enb_gpio, 0);
 
 	return 0;
 }
@@ -194,12 +191,10 @@ static int pwm_regulator_set_voltage(struct regulator_dev *rdev,
 	unsigned int min_uV_duty = drvdata->continuous.min_uV_dutycycle;
 	unsigned int max_uV_duty = drvdata->continuous.max_uV_dutycycle;
 	unsigned int duty_unit = drvdata->continuous.dutycycle_unit;
-	unsigned int ramp_delay = rdev->constraints->ramp_delay;
 	int min_uV = rdev->constraints->min_uV;
 	int max_uV = rdev->constraints->max_uV;
 	int diff_uV = max_uV - min_uV;
 	struct pwm_state pstate;
-	int old_uV = pwm_regulator_get_voltage(rdev);
 	unsigned int diff_duty;
 	unsigned int dutycycle;
 	int ret;
@@ -232,13 +227,6 @@ static int pwm_regulator_set_voltage(struct regulator_dev *rdev,
 		dev_err(&rdev->dev, "Failed to configure PWM: %d\n", ret);
 		return ret;
 	}
-
-	if ((ramp_delay == 0) || !pwm_regulator_is_enabled(rdev))
-		return 0;
-
-	/* Ramp delay is in uV/uS. Adjust to uS and delay */
-	ramp_delay = DIV_ROUND_UP(abs(req_min_uV - old_uV), ramp_delay);
-	usleep_range(ramp_delay, ramp_delay + DIV_ROUND_UP(ramp_delay, 10));
 
 	return 0;
 }

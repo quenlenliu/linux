@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _IPCONNTRACK_NETLINK_H
 #define _IPCONNTRACK_NETLINK_H
 #include <linux/netfilter/nfnetlink.h>
@@ -53,6 +54,7 @@ enum ctattr_type {
 	CTA_MARK_MASK,
 	CTA_LABELS,
 	CTA_LABELS_MASK,
+	CTA_SYNPROXY,
 	__CTA_MAX
 };
 #define CTA_MAX (__CTA_MAX - 1)
@@ -189,6 +191,15 @@ enum ctattr_natseq {
 };
 #define CTA_NAT_SEQ_MAX (__CTA_NAT_SEQ_MAX - 1)
 
+enum ctattr_synproxy {
+	CTA_SYNPROXY_UNSPEC,
+	CTA_SYNPROXY_ISN,
+	CTA_SYNPROXY_ITS,
+	CTA_SYNPROXY_TSOFF,
+	__CTA_SYNPROXY_MAX,
+};
+#define CTA_SYNPROXY_MAX (__CTA_SYNPROXY_MAX - 1)
+
 enum ctattr_expect {
 	CTA_EXPECT_UNSPEC,
 	CTA_EXPECT_MASTER,
@@ -231,13 +242,13 @@ enum ctattr_secctx {
 
 enum ctattr_stats_cpu {
 	CTA_STATS_UNSPEC,
-	CTA_STATS_SEARCHED,
+	CTA_STATS_SEARCHED,	/* no longer used */
 	CTA_STATS_FOUND,
-	CTA_STATS_NEW,
+	CTA_STATS_NEW,		/* no longer used */
 	CTA_STATS_INVALID,
 	CTA_STATS_IGNORE,
-	CTA_STATS_DELETE,
-	CTA_STATS_DELETE_LIST,
+	CTA_STATS_DELETE,	/* no longer used */
+	CTA_STATS_DELETE_LIST,	/* no longer used */
 	CTA_STATS_INSERT,
 	CTA_STATS_INSERT_FAILED,
 	CTA_STATS_DROP,
@@ -251,6 +262,7 @@ enum ctattr_stats_cpu {
 enum ctattr_stats_global {
 	CTA_STATS_GLOBAL_UNSPEC,
 	CTA_STATS_GLOBAL_ENTRIES,
+	CTA_STATS_GLOBAL_MAX_ENTRIES,
 	__CTA_STATS_GLOBAL_MAX,
 };
 #define CTA_STATS_GLOBAL_MAX (__CTA_STATS_GLOBAL_MAX - 1)

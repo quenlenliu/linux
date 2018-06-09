@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
@@ -72,7 +73,7 @@
 
 #include <linux/module.h>
 #include <linux/types.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
 #include <linux/kernel.h>
@@ -102,6 +103,7 @@
 #include <linux/uaccess.h>
 #include <linux/kdb.h>
 #include <linux/ctype.h>
+#include <linux/bsearch.h>
 
 #define MAX_NR_CON_DRIVER 16
 
@@ -156,7 +158,7 @@ static void set_cursor(struct vc_data *vc);
 static void hide_cursor(struct vc_data *vc);
 static void console_callback(struct work_struct *ignored);
 static void con_driver_unregister_callback(struct work_struct *ignored);
-static void blank_screen_t(unsigned long dummy);
+static void blank_screen_t(struct timer_list *unused);
 static void set_palette(struct vc_data *vc);
 
 #define vt_get_kmsg_redirect() vt_kmsg_redirect(-1)
@@ -181,7 +183,7 @@ int console_blanked;
 
 static int vesa_blank_mode; /* 0:none 1:suspendV 2:suspendH 3:powerdown */
 static int vesa_off_interval;
-static int blankinterval = 10*60;
+static int blankinterval;
 core_param(consoleblank, blankinterval, int, 0444);
 
 static DECLARE_WORK(console_work, console_callback);
@@ -228,7 +230,7 @@ static int scrollback_delta;
  */
 int (*console_blank_hook)(int);
 
-static DEFINE_TIMER(console_timer, blank_screen_t, 0, 0);
+static DEFINE_TIMER(console_timer, blank_screen_t);
 static int blank_state;
 static int blank_timer_expired;
 enum {
@@ -315,38 +317,27 @@ void schedule_console_callback(void)
 	schedule_work(&console_work);
 }
 
-static void scrup(struct vc_data *vc, unsigned int t, unsigned int b, int nr)
+static void con_scroll(struct vc_data *vc, unsigned int t, unsigned int b,
+		enum con_scroll dir, unsigned int nr)
 {
-	unsigned short *d, *s;
+	u16 *clear, *d, *s;
 
-	if (t+nr >= b)
+	if (t + nr >= b)
 		nr = b - t - 1;
 	if (b > vc->vc_rows || t >= b || nr < 1)
 		return;
-	if (con_is_visible(vc) && vc->vc_sw->con_scroll(vc, t, b, SM_UP, nr))
+	if (con_is_visible(vc) && vc->vc_sw->con_scroll(vc, t, b, dir, nr))
 		return;
-	d = (unsigned short *)(vc->vc_origin + vc->vc_size_row * t);
-	s = (unsigned short *)(vc->vc_origin + vc->vc_size_row * (t + nr));
+
+	s = clear = (u16 *)(vc->vc_origin + vc->vc_size_row * t);
+	d = (u16 *)(vc->vc_origin + vc->vc_size_row * (t + nr));
+
+	if (dir == SM_UP) {
+		clear = s + (b - t - nr) * vc->vc_cols;
+		swap(s, d);
+	}
 	scr_memmovew(d, s, (b - t - nr) * vc->vc_size_row);
-	scr_memsetw(d + (b - t - nr) * vc->vc_cols, vc->vc_video_erase_char,
-		    vc->vc_size_row * nr);
-}
-
-static void scrdown(struct vc_data *vc, unsigned int t, unsigned int b, int nr)
-{
-	unsigned short *s;
-	unsigned int step;
-
-	if (t+nr >= b)
-		nr = b - t - 1;
-	if (b > vc->vc_rows || t >= b || nr < 1)
-		return;
-	if (con_is_visible(vc) && vc->vc_sw->con_scroll(vc, t, b, SM_DOWN, nr))
-		return;
-	s = (unsigned short *)(vc->vc_origin + vc->vc_size_row * t);
-	step = vc->vc_cols * nr;
-	scr_memmovew(s + step, s, (b - t - nr) * vc->vc_size_row);
-	scr_memsetw(s, vc->vc_video_erase_char, 2 * step);
+	scr_memsetw(clear, vc->vc_video_erase_char, vc->vc_size_row * nr);
 }
 
 static void do_update_region(struct vc_data *vc, unsigned long start, int count)
@@ -436,7 +427,7 @@ static u8 build_attr(struct vc_data *vc, u8 _color, u8 _intensity, u8 _blink,
 	else if (_underline)
 		a = (a & 0xf0) | vc->vc_ulcolor;
 	else if (_intensity == 0)
-		a = (a & 0xf0) | vc->vc_ulcolor;
+		a = (a & 0xf0) | vc->vc_halfcolor;
 	if (_reverse)
 		a = ((a) & 0x88) | ((((a) >> 4) | ((a) << 4)) & 0x77);
 	if (_blink)
@@ -634,6 +625,14 @@ static void save_screen(struct vc_data *vc)
 
 	if (vc->vc_sw->con_save_screen)
 		vc->vc_sw->con_save_screen(vc);
+}
+
+static void flush_scrollback(struct vc_data *vc)
+{
+	WARN_CONSOLE_UNLOCKED();
+
+	if (vc->vc_sw->con_flush_scrollback)
+		vc->vc_sw->con_flush_scrollback(vc);
 }
 
 /*
@@ -870,9 +869,14 @@ static int vc_do_resize(struct tty_struct *tty, struct vc_data *vc,
 	if (new_cols == vc->vc_cols && new_rows == vc->vc_rows)
 		return 0;
 
+	if (new_screen_size > (4 << 20))
+		return -EINVAL;
 	newscreen = kmalloc(new_screen_size, GFP_USER);
 	if (!newscreen)
 		return -ENOMEM;
+
+	if (vc == sel_cons)
+		clear_selection();
 
 	old_rows = vc->vc_rows;
 	old_row_size = vc->vc_size_row;
@@ -1115,7 +1119,7 @@ static void lf(struct vc_data *vc)
 	 * if below scrolling region
 	 */
     	if (vc->vc_y + 1 == vc->vc_bottom)
-		scrup(vc, vc->vc_top, vc->vc_bottom, 1);
+		con_scroll(vc, vc->vc_top, vc->vc_bottom, SM_UP, 1);
 	else if (vc->vc_y < vc->vc_rows - 1) {
 	    	vc->vc_y++;
 		vc->vc_pos += vc->vc_size_row;
@@ -1130,7 +1134,7 @@ static void ri(struct vc_data *vc)
 	 * if above scrolling region
 	 */
 	if (vc->vc_y == vc->vc_top)
-		scrdown(vc, vc->vc_top, vc->vc_bottom, 1);
+		con_scroll(vc, vc->vc_top, vc->vc_bottom, SM_DOWN, 1);
 	else if (vc->vc_y > 0) {
 		vc->vc_y--;
 		vc->vc_pos -= vc->vc_size_row;
@@ -1174,14 +1178,8 @@ static void csi_J(struct vc_data *vc, int vpar)
 			count = ((vc->vc_pos - vc->vc_origin) >> 1) + 1;
 			start = (unsigned short *)vc->vc_origin;
 			break;
-		case 3: /* erase scroll-back buffer (and whole display) */
-			scr_memsetw(vc->vc_screenbuf, vc->vc_video_erase_char,
-				    vc->vc_screenbuf_size >> 1);
-			set_origin(vc);
-			if (con_is_visible(vc))
-				update_screen(vc);
-			/* fall through */
 		case 2: /* erase whole display */
+		case 3: /* (and scrollback buffer later) */
 			count = vc->vc_cols * vc->vc_rows;
 			start = (unsigned short *)vc->vc_origin;
 			break;
@@ -1189,7 +1187,12 @@ static void csi_J(struct vc_data *vc, int vpar)
 			return;
 	}
 	scr_memsetw(start, vc->vc_video_erase_char, 2 * count);
-	if (con_should_update(vc))
+	if (vpar == 3) {
+		set_origin(vc);
+		flush_scrollback(vc);
+		if (con_is_visible(vc))
+			update_screen(vc);
+	} else if (con_should_update(vc))
 		do_update_region(vc, (unsigned long) start, count);
 	vc->vc_need_wrap = 0;
 }
@@ -1312,12 +1315,12 @@ static int vc_t416_color(struct vc_data *vc, int i,
 	if (i > vc->vc_npar)
 		return i;
 
-	if (vc->vc_par[i] == 5 && i < vc->vc_npar) {
-		/* 256 colours -- ubiquitous */
+	if (vc->vc_par[i] == 5 && i + 1 <= vc->vc_npar) {
+		/* 256 colours */
 		i++;
 		rgb_from_256(vc->vc_par[i], &c);
-	} else if (vc->vc_par[i] == 2 && i <= vc->vc_npar + 3) {
-		/* 24 bit -- extremely rare */
+	} else if (vc->vc_par[i] == 2 && i + 3 <= vc->vc_npar) {
+		/* 24 bit */
 		c.r = vc->vc_par[i + 1];
 		c.g = vc->vc_par[i + 2];
 		c.b = vc->vc_par[i + 3];
@@ -1349,6 +1352,11 @@ static void csi_m(struct vc_data *vc)
 		case 3:
 			vc->vc_italic = 1;
 			break;
+		case 21:
+			/*
+			 * No console drivers support double underline, so
+			 * convert it to a single underline.
+			 */
 		case 4:
 			vc->vc_underline = 1;
 			break;
@@ -1384,7 +1392,6 @@ static void csi_m(struct vc_data *vc)
 			vc->vc_disp_ctrl = 1;
 			vc->vc_toggle_meta = 1;
 			break;
-		case 21:
 		case 22:
 			vc->vc_intensity = 1;
 			break;
@@ -1415,6 +1422,11 @@ static void csi_m(struct vc_data *vc)
 				(vc->vc_color & 0x0f);
 			break;
 		default:
+			if (vc->vc_par[i] >= 90 && vc->vc_par[i] <= 107) {
+				if (vc->vc_par[i] < 100)
+					vc->vc_intensity = 2;
+				vc->vc_par[i] -= 60;
+			}
 			if (vc->vc_par[i] >= 30 && vc->vc_par[i] <= 37)
 				vc->vc_color = color_table[vc->vc_par[i] - 30]
 					| (vc->vc_color & 0xf0);
@@ -1621,7 +1633,7 @@ static void csi_L(struct vc_data *vc, unsigned int nr)
 		nr = vc->vc_rows - vc->vc_y;
 	else if (!nr)
 		nr = 1;
-	scrdown(vc, vc->vc_y, vc->vc_bottom, nr);
+	con_scroll(vc, vc->vc_y, vc->vc_bottom, SM_DOWN, nr);
 	vc->vc_need_wrap = 0;
 }
 
@@ -1642,7 +1654,7 @@ static void csi_M(struct vc_data *vc, unsigned int nr)
 		nr = vc->vc_rows - vc->vc_y;
 	else if (!nr)
 		nr=1;
-	scrup(vc, vc->vc_y, vc->vc_bottom, nr);
+	con_scroll(vc, vc->vc_y, vc->vc_bottom, SM_UP, nr);
 	vc->vc_need_wrap = 0;
 }
 
@@ -1717,7 +1729,7 @@ static void reset_terminal(struct vc_data *vc, int do_clear)
 	default_attr(vc);
 	update_attr(vc);
 
-	vc->vc_tab_stop[0]	= 0x01010100;
+	vc->vc_tab_stop[0]	=
 	vc->vc_tab_stop[1]	=
 	vc->vc_tab_stop[2]	=
 	vc->vc_tab_stop[3]	=
@@ -1761,7 +1773,7 @@ static void do_con_trol(struct tty_struct *tty, struct vc_data *vc, int c)
 		vc->vc_pos -= (vc->vc_x << 1);
 		while (vc->vc_x < vc->vc_cols - 1) {
 			vc->vc_x++;
-			if (vc->vc_tab_stop[vc->vc_x >> 5] & (1 << (vc->vc_x & 31)))
+			if (vc->vc_tab_stop[7 & (vc->vc_x >> 5)] & (1 << (vc->vc_x & 31)))
 				break;
 		}
 		vc->vc_pos += (vc->vc_x << 1);
@@ -1821,7 +1833,7 @@ static void do_con_trol(struct tty_struct *tty, struct vc_data *vc, int c)
 			lf(vc);
 			return;
 		case 'H':
-			vc->vc_tab_stop[vc->vc_x >> 5] |= (1 << (vc->vc_x & 31));
+			vc->vc_tab_stop[7 & (vc->vc_x >> 5)] |= (1 << (vc->vc_x & 31));
 			return;
 		case 'Z':
 			respond_ID(tty);
@@ -2014,7 +2026,7 @@ static void do_con_trol(struct tty_struct *tty, struct vc_data *vc, int c)
 			return;
 		case 'g':
 			if (!vc->vc_par[0])
-				vc->vc_tab_stop[vc->vc_x >> 5] &= ~(1 << (vc->vc_x & 31));
+				vc->vc_tab_stop[7 & (vc->vc_x >> 5)] &= ~(1 << (vc->vc_x & 31));
 			else if (vc->vc_par[0] == 3) {
 				vc->vc_tab_stop[0] =
 					vc->vc_tab_stop[1] =
@@ -2134,22 +2146,15 @@ struct interval {
 	uint32_t last;
 };
 
-static int bisearch(uint32_t ucs, const struct interval *table, int max)
+static int ucs_cmp(const void *key, const void *elt)
 {
-	int min = 0;
-	int mid;
+	uint32_t ucs = *(uint32_t *)key;
+	struct interval e = *(struct interval *) elt;
 
-	if (ucs < table[0].first || ucs > table[max].last)
-		return 0;
-	while (max >= min) {
-		mid = (min + max) / 2;
-		if (ucs > table[mid].last)
-			min = mid + 1;
-		else if (ucs < table[mid].first)
-			max = mid - 1;
-		else
-			return 1;
-	}
+	if (ucs > e.last)
+		return 1;
+	else if (ucs < e.first)
+		return -1;
 	return 0;
 }
 
@@ -2161,7 +2166,12 @@ static int is_double_width(uint32_t ucs)
 		{ 0xFE10, 0xFE19 }, { 0xFE30, 0xFE6F }, { 0xFF00, 0xFF60 },
 		{ 0xFFE0, 0xFFE6 }, { 0x20000, 0x2FFFD }, { 0x30000, 0x3FFFD }
 	};
-	return bisearch(ucs, double_width, ARRAY_SIZE(double_width) - 1);
+	if (ucs < double_width[0].first ||
+	    ucs > double_width[ARRAY_SIZE(double_width) - 1].last)
+		return 0;
+
+	return bsearch(&ucs, double_width, ARRAY_SIZE(double_width),
+			sizeof(struct interval), ucs_cmp) != NULL;
 }
 
 static void con_flush(struct vc_data *vc, unsigned long draw_from,
@@ -2197,7 +2207,7 @@ static int do_con_write(struct tty_struct *tty, const unsigned char *buf, int co
 	console_lock();
 	vc = tty->driver_data;
 	if (vc == NULL) {
-		printk(KERN_ERR "vt: argh, driver_data is NULL !\n");
+		pr_err("vt: argh, driver_data is NULL !\n");
 		console_unlock();
 		return 0;
 	}
@@ -2701,13 +2711,13 @@ int tioclinux(struct tty_struct *tty, unsigned long arg)
 	 * related to the kernel should not use this.
 	 */
 			data = vt_get_shift_state();
-			ret = __put_user(data, p);
+			ret = put_user(data, p);
 			break;
 		case TIOCL_GETMOUSEREPORTING:
 			console_lock();	/* May be overkill */
 			data = mouse_reporting();
 			console_unlock();
-			ret = __put_user(data, p);
+			ret = put_user(data, p);
 			break;
 		case TIOCL_SETVESABLANK:
 			console_lock();
@@ -2716,7 +2726,7 @@ int tioclinux(struct tty_struct *tty, unsigned long arg)
 			break;
 		case TIOCL_GETKMSGREDIRECT:
 			data = vt_get_kmsg_redirect();
-			ret = __put_user(data, p);
+			ret = put_user(data, p);
 			break;
 		case TIOCL_SETKMSGREDIRECT:
 			if (!capable(CAP_SYS_ADMIN)) {
@@ -3182,20 +3192,21 @@ static int do_bind_con_driver(const struct consw *csw, int first, int last,
 
 	pr_info("Console: switching ");
 	if (!deflt)
-		printk("consoles %d-%d ", first+1, last+1);
+		pr_cont("consoles %d-%d ", first + 1, last + 1);
 	if (j >= 0) {
 		struct vc_data *vc = vc_cons[j].d;
 
-		printk("to %s %s %dx%d\n",
-		       vc->vc_can_do_color ? "colour" : "mono",
-		       desc, vc->vc_cols, vc->vc_rows);
+		pr_cont("to %s %s %dx%d\n",
+			vc->vc_can_do_color ? "colour" : "mono",
+			desc, vc->vc_cols, vc->vc_rows);
 
 		if (k >= 0) {
 			vc = vc_cons[k].d;
 			update_screen(vc);
 		}
-	} else
-		printk("to %s\n", desc);
+	} else {
+		pr_cont("to %s\n", desc);
+	}
 
 	retval = 0;
 err:
@@ -3614,9 +3625,8 @@ static int do_register_con_driver(const struct consw *csw, int first, int last)
 					  con_driver, con_dev_groups,
 					  "vtcon%i", con_driver->node);
 	if (IS_ERR(con_driver->dev)) {
-		printk(KERN_WARNING "Unable to create device for %s; "
-		       "errno = %ld\n", con_driver->desc,
-		       PTR_ERR(con_driver->dev));
+		pr_warn("Unable to create device for %s; errno = %ld\n",
+			con_driver->desc, PTR_ERR(con_driver->dev));
 		con_driver->dev = NULL;
 	} else {
 		vtconsole_init_device(con_driver);
@@ -3753,8 +3763,8 @@ static int __init vtconsole_class_init(void)
 
 	vtconsole_class = class_create(THIS_MODULE, "vtconsole");
 	if (IS_ERR(vtconsole_class)) {
-		printk(KERN_WARNING "Unable to create vt console class; "
-		       "errno = %ld\n", PTR_ERR(vtconsole_class));
+		pr_warn("Unable to create vt console class; errno = %ld\n",
+			PTR_ERR(vtconsole_class));
 		vtconsole_class = NULL;
 	}
 
@@ -3770,9 +3780,8 @@ static int __init vtconsole_class_init(void)
 							  "vtcon%i", con->node);
 
 			if (IS_ERR(con->dev)) {
-				printk(KERN_WARNING "Unable to create "
-				       "device for %s; errno = %ld\n",
-				       con->desc, PTR_ERR(con->dev));
+				pr_warn("Unable to create device for %s; errno = %ld\n",
+					con->desc, PTR_ERR(con->dev));
 				con->dev = NULL;
 			} else {
 				vtconsole_init_device(con);
@@ -3922,12 +3931,8 @@ void unblank_screen(void)
  * (console operations can still happen at irq time, but only from printk which
  * has the console mutex. Not perfect yet, but better than no locking
  */
-static void blank_screen_t(unsigned long dummy)
+static void blank_screen_t(struct timer_list *unused)
 {
-	if (unlikely(!keventd_up())) {
-		mod_timer(&console_timer, jiffies + (blankinterval * HZ));
-		return;
-	}
 	blank_timer_expired = 1;
 	schedule_work(&console_work);
 }
@@ -4117,37 +4122,45 @@ static int con_font_set(struct vc_data *vc, struct console_font_op *op)
 		return -EINVAL;
 	if (op->charcount > 512)
 		return -EINVAL;
-	if (!op->height) {		/* Need to guess font height [compat] */
-		int h, i;
-		u8 __user *charmap = op->data;
-		u8 tmp;
-		
-		/* If from KDFONTOP ioctl, don't allow things which can be done in userland,
-		   so that we can get rid of this soon */
-		if (!(op->flags & KD_FONT_FLAG_OLD))
-			return -EINVAL;
-		for (h = 32; h > 0; h--)
-			for (i = 0; i < op->charcount; i++) {
-				if (get_user(tmp, &charmap[32*i+h-1]))
-					return -EFAULT;
-				if (tmp)
-					goto nonzero;
-			}
-		return -EINVAL;
-	nonzero:
-		op->height = h;
-	}
 	if (op->width <= 0 || op->width > 32 || op->height > 32)
 		return -EINVAL;
 	size = (op->width+7)/8 * 32 * op->charcount;
 	if (size > max_font_size)
 		return -ENOSPC;
-	font.charcount = op->charcount;
-	font.height = op->height;
-	font.width = op->width;
+
 	font.data = memdup_user(op->data, size);
 	if (IS_ERR(font.data))
 		return PTR_ERR(font.data);
+
+	if (!op->height) {		/* Need to guess font height [compat] */
+		int h, i;
+		u8 *charmap = font.data;
+
+		/*
+		 * If from KDFONTOP ioctl, don't allow things which can be done
+		 * in userland,so that we can get rid of this soon
+		 */
+		if (!(op->flags & KD_FONT_FLAG_OLD)) {
+			kfree(font.data);
+			return -EINVAL;
+		}
+
+		for (h = 32; h > 0; h--)
+			for (i = 0; i < op->charcount; i++)
+				if (charmap[32*i+h-1])
+					goto nonzero;
+
+		kfree(font.data);
+		return -EINVAL;
+
+	nonzero:
+		op->height = h;
+	}
+
+	font.charcount = op->charcount;
+	font.width = op->width;
+	font.height = op->height;
+
 	console_lock();
 	if (vc->vc_mode != KD_TEXT)
 		rc = -EINVAL;
@@ -4284,6 +4297,46 @@ void vcs_scr_updated(struct vc_data *vc)
 {
 	notify_update(vc);
 }
+
+void vc_scrolldelta_helper(struct vc_data *c, int lines,
+		unsigned int rolled_over, void *base, unsigned int size)
+{
+	unsigned long ubase = (unsigned long)base;
+	ptrdiff_t scr_end = (void *)c->vc_scr_end - base;
+	ptrdiff_t vorigin = (void *)c->vc_visible_origin - base;
+	ptrdiff_t origin = (void *)c->vc_origin - base;
+	int margin = c->vc_size_row * 4;
+	int from, wrap, from_off, avail;
+
+	/* Turn scrollback off */
+	if (!lines) {
+		c->vc_visible_origin = c->vc_origin;
+		return;
+	}
+
+	/* Do we have already enough to allow jumping from 0 to the end? */
+	if (rolled_over > scr_end + margin) {
+		from = scr_end;
+		wrap = rolled_over + c->vc_size_row;
+	} else {
+		from = 0;
+		wrap = size;
+	}
+
+	from_off = (vorigin - from + wrap) % wrap + lines * c->vc_size_row;
+	avail = (origin - from + wrap) % wrap;
+
+	/* Only a little piece would be left? Show all incl. the piece! */
+	if (avail < 2 * margin)
+		margin = 0;
+	if (from_off < margin)
+		from_off = 0;
+	if (from_off > avail - margin)
+		from_off = avail;
+
+	c->vc_visible_origin = ubase + (from + from_off) % wrap;
+}
+EXPORT_SYMBOL_GPL(vc_scrolldelta_helper);
 
 /*
  *	Visible symbols for modules

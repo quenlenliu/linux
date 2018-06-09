@@ -1,8 +1,5 @@
-#include <sys/mman.h>
-
-#ifndef PROT_SEM
-#define PROT_SEM 0x8
-#endif
+// SPDX-License-Identifier: GPL-2.0
+#include <uapi/linux/mman.h>
 
 static size_t syscall_arg__scnprintf_mmap_prot(char *bf, size_t size,
 					       struct syscall_arg *arg)
@@ -33,35 +30,13 @@ static size_t syscall_arg__scnprintf_mmap_prot(char *bf, size_t size,
 
 #define SCA_MMAP_PROT syscall_arg__scnprintf_mmap_prot
 
-#ifndef MAP_FIXED
-#define MAP_FIXED		     0x10
-#endif
-
-#ifndef MAP_ANONYMOUS
-#define MAP_ANONYMOUS		     0x20
-#endif
-
-#ifndef MAP_32BIT
-#define MAP_32BIT		     0x40
-#endif
-
-#ifndef MAP_STACK
-#define MAP_STACK		  0x20000
-#endif
-
-#ifndef MAP_HUGETLB
-#define MAP_HUGETLB		  0x40000
-#endif
-
-#ifndef MAP_UNINITIALIZED
-#define MAP_UNINITIALIZED	0x4000000
-#endif
-
-
 static size_t syscall_arg__scnprintf_mmap_flags(char *bf, size_t size,
 						struct syscall_arg *arg)
 {
 	int printed = 0, flags = arg->val;
+
+	if (flags & MAP_ANONYMOUS)
+		arg->mask |= (1 << 4) | (1 << 5); /* Mask 4th ('fd') and 5th ('offset') args, ignored */
 
 #define	P_MMAP_FLAG(n) \
 	if (flags & MAP_##n) { \
@@ -71,12 +46,17 @@ static size_t syscall_arg__scnprintf_mmap_flags(char *bf, size_t size,
 
 	P_MMAP_FLAG(SHARED);
 	P_MMAP_FLAG(PRIVATE);
+#ifdef MAP_32BIT
 	P_MMAP_FLAG(32BIT);
+#endif
 	P_MMAP_FLAG(ANONYMOUS);
 	P_MMAP_FLAG(DENYWRITE);
 	P_MMAP_FLAG(EXECUTABLE);
 	P_MMAP_FLAG(FILE);
 	P_MMAP_FLAG(FIXED);
+#ifdef MAP_FIXED_NOREPLACE
+	P_MMAP_FLAG(FIXED_NOREPLACE);
+#endif
 	P_MMAP_FLAG(GROWSDOWN);
 	P_MMAP_FLAG(HUGETLB);
 	P_MMAP_FLAG(LOCKED);
@@ -85,6 +65,9 @@ static size_t syscall_arg__scnprintf_mmap_flags(char *bf, size_t size,
 	P_MMAP_FLAG(POPULATE);
 	P_MMAP_FLAG(STACK);
 	P_MMAP_FLAG(UNINITIALIZED);
+#ifdef MAP_SYNC
+	P_MMAP_FLAG(SYNC);
+#endif
 #undef P_MMAP_FLAG
 
 	if (flags)
@@ -94,13 +77,6 @@ static size_t syscall_arg__scnprintf_mmap_flags(char *bf, size_t size,
 }
 
 #define SCA_MMAP_FLAGS syscall_arg__scnprintf_mmap_flags
-
-#ifndef MREMAP_MAYMOVE
-#define MREMAP_MAYMOVE 1
-#endif
-#ifndef MREMAP_FIXED
-#define MREMAP_FIXED 2
-#endif
 
 static size_t syscall_arg__scnprintf_mremap_flags(char *bf, size_t size,
 						  struct syscall_arg *arg)
@@ -125,67 +101,21 @@ static size_t syscall_arg__scnprintf_mremap_flags(char *bf, size_t size,
 
 #define SCA_MREMAP_FLAGS syscall_arg__scnprintf_mremap_flags
 
-#ifndef MADV_HWPOISON
-#define MADV_HWPOISON		100
-#endif
+static size_t madvise__scnprintf_behavior(int behavior, char *bf, size_t size)
+{
+#include "trace/beauty/generated/madvise_behavior_array.c"
+       static DEFINE_STRARRAY(madvise_advices);
 
-#ifndef MADV_SOFT_OFFLINE
-#define MADV_SOFT_OFFLINE	101
-#endif
+       if (behavior < strarray__madvise_advices.nr_entries && strarray__madvise_advices.entries[behavior] != NULL)
+               return scnprintf(bf, size, "MADV_%s", strarray__madvise_advices.entries[behavior]);
 
-#ifndef MADV_MERGEABLE
-#define MADV_MERGEABLE		 12
-#endif
-
-#ifndef MADV_UNMERGEABLE
-#define MADV_UNMERGEABLE	 13
-#endif
-
-#ifndef MADV_HUGEPAGE
-#define MADV_HUGEPAGE		 14
-#endif
-
-#ifndef MADV_NOHUGEPAGE
-#define MADV_NOHUGEPAGE		 15
-#endif
-
-#ifndef MADV_DONTDUMP
-#define MADV_DONTDUMP		 16
-#endif
-
-#ifndef MADV_DODUMP
-#define MADV_DODUMP		 17
-#endif
-
+       return scnprintf(bf, size, "%#", behavior);
+}
 
 static size_t syscall_arg__scnprintf_madvise_behavior(char *bf, size_t size,
 						      struct syscall_arg *arg)
 {
-	int behavior = arg->val;
-
-	switch (behavior) {
-#define	P_MADV_BHV(n) case MADV_##n: return scnprintf(bf, size, #n)
-	P_MADV_BHV(NORMAL);
-	P_MADV_BHV(RANDOM);
-	P_MADV_BHV(SEQUENTIAL);
-	P_MADV_BHV(WILLNEED);
-	P_MADV_BHV(DONTNEED);
-	P_MADV_BHV(REMOVE);
-	P_MADV_BHV(DONTFORK);
-	P_MADV_BHV(DOFORK);
-	P_MADV_BHV(HWPOISON);
-	P_MADV_BHV(SOFT_OFFLINE);
-	P_MADV_BHV(MERGEABLE);
-	P_MADV_BHV(UNMERGEABLE);
-	P_MADV_BHV(HUGEPAGE);
-	P_MADV_BHV(NOHUGEPAGE);
-	P_MADV_BHV(DONTDUMP);
-	P_MADV_BHV(DODUMP);
-#undef P_MADV_BHV
-	default: break;
-	}
-
-	return scnprintf(bf, size, "%#x", behavior);
+	return madvise__scnprintf_behavior(arg->val, bf, size);
 }
 
 #define SCA_MADV_BHV syscall_arg__scnprintf_madvise_behavior

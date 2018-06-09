@@ -1,4 +1,5 @@
-/* Copyright (C) 2009-2016  B.A.T.M.A.N. contributors:
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright (C) 2009-2018  B.A.T.M.A.N. contributors:
  *
  * Marek Lindner, Simon Wunderlich
  *
@@ -21,18 +22,24 @@
 #include <linux/atomic.h>
 #include <linux/errno.h>
 #include <linux/etherdevice.h>
-#include <linux/fs.h>
+#include <linux/gfp.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/kref.h>
 #include <linux/list.h>
 #include <linux/lockdep.h>
 #include <linux/netdevice.h>
+#include <linux/netlink.h>
 #include <linux/rculist.h>
+#include <linux/rcupdate.h>
 #include <linux/seq_file.h>
+#include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/stddef.h>
 #include <linux/workqueue.h>
+#include <net/sock.h>
+#include <uapi/linux/batman_adv.h>
 
 #include "bat_algo.h"
 #include "distributed-arp-table.h"
@@ -42,17 +49,56 @@
 #include "hash.h"
 #include "log.h"
 #include "multicast.h"
+#include "netlink.h"
 #include "network-coding.h"
 #include "routing.h"
+#include "soft-interface.h"
 #include "translation-table.h"
 
 /* hash class keys */
 static struct lock_class_key batadv_orig_hash_lock_class_key;
 
+/**
+ * batadv_orig_hash_find() - Find and return originator from orig_hash
+ * @bat_priv: the bat priv with all the soft interface information
+ * @data: mac address of the originator
+ *
+ * Return: orig_node (with increased refcnt), NULL on errors
+ */
+struct batadv_orig_node *
+batadv_orig_hash_find(struct batadv_priv *bat_priv, const void *data)
+{
+	struct batadv_hashtable *hash = bat_priv->orig_hash;
+	struct hlist_head *head;
+	struct batadv_orig_node *orig_node, *orig_node_tmp = NULL;
+	int index;
+
+	if (!hash)
+		return NULL;
+
+	index = batadv_choose_orig(data, hash->size);
+	head = &hash->table[index];
+
+	rcu_read_lock();
+	hlist_for_each_entry_rcu(orig_node, head, hash_entry) {
+		if (!batadv_compare_eth(orig_node, data))
+			continue;
+
+		if (!kref_get_unless_zero(&orig_node->refcount))
+			continue;
+
+		orig_node_tmp = orig_node;
+		break;
+	}
+	rcu_read_unlock();
+
+	return orig_node_tmp;
+}
+
 static void batadv_purge_orig(struct work_struct *work);
 
 /**
- * batadv_compare_orig - comparing function used in the originator hash table
+ * batadv_compare_orig() - comparing function used in the originator hash table
  * @node: node in the local table
  * @data2: second object to compare the node to
  *
@@ -67,7 +113,7 @@ bool batadv_compare_orig(const struct hlist_node *node, const void *data2)
 }
 
 /**
- * batadv_orig_node_vlan_get - get an orig_node_vlan object
+ * batadv_orig_node_vlan_get() - get an orig_node_vlan object
  * @orig_node: the originator serving the VLAN
  * @vid: the VLAN identifier
  *
@@ -98,7 +144,7 @@ batadv_orig_node_vlan_get(struct batadv_orig_node *orig_node,
 }
 
 /**
- * batadv_orig_node_vlan_new - search and possibly create an orig_node_vlan
+ * batadv_orig_node_vlan_new() - search and possibly create an orig_node_vlan
  *  object
  * @orig_node: the originator serving the VLAN
  * @vid: the VLAN identifier
@@ -127,9 +173,9 @@ batadv_orig_node_vlan_new(struct batadv_orig_node *orig_node,
 		goto out;
 
 	kref_init(&vlan->refcount);
-	kref_get(&vlan->refcount);
 	vlan->vid = vid;
 
+	kref_get(&vlan->refcount);
 	hlist_add_head_rcu(&vlan->list, &orig_node->vlan_list);
 
 out:
@@ -139,7 +185,7 @@ out:
 }
 
 /**
- * batadv_orig_node_vlan_release - release originator-vlan object from lists
+ * batadv_orig_node_vlan_release() - release originator-vlan object from lists
  *  and queue for free after rcu grace period
  * @ref: kref pointer of the originator-vlan object
  */
@@ -153,7 +199,7 @@ static void batadv_orig_node_vlan_release(struct kref *ref)
 }
 
 /**
- * batadv_orig_node_vlan_put - decrement the refcounter and possibly release
+ * batadv_orig_node_vlan_put() - decrement the refcounter and possibly release
  *  the originator-vlan object
  * @orig_vlan: the originator-vlan object to release
  */
@@ -162,6 +208,12 @@ void batadv_orig_node_vlan_put(struct batadv_orig_node_vlan *orig_vlan)
 	kref_put(&orig_vlan->refcount, batadv_orig_node_vlan_release);
 }
 
+/**
+ * batadv_originator_init() - Initialize all originator structures
+ * @bat_priv: the bat priv with all the soft interface information
+ *
+ * Return: 0 on success or negative error number in case of failure
+ */
 int batadv_originator_init(struct batadv_priv *bat_priv)
 {
 	if (bat_priv->orig_hash)
@@ -187,7 +239,7 @@ err:
 }
 
 /**
- * batadv_neigh_ifinfo_release - release neigh_ifinfo from lists and queue for
+ * batadv_neigh_ifinfo_release() - release neigh_ifinfo from lists and queue for
  *  free after rcu grace period
  * @ref: kref pointer of the neigh_ifinfo
  */
@@ -204,7 +256,7 @@ static void batadv_neigh_ifinfo_release(struct kref *ref)
 }
 
 /**
- * batadv_neigh_ifinfo_put - decrement the refcounter and possibly release
+ * batadv_neigh_ifinfo_put() - decrement the refcounter and possibly release
  *  the neigh_ifinfo
  * @neigh_ifinfo: the neigh_ifinfo object to release
  */
@@ -214,7 +266,7 @@ void batadv_neigh_ifinfo_put(struct batadv_neigh_ifinfo *neigh_ifinfo)
 }
 
 /**
- * batadv_hardif_neigh_release - release hardif neigh node from lists and
+ * batadv_hardif_neigh_release() - release hardif neigh node from lists and
  *  queue for free after rcu grace period
  * @ref: kref pointer of the neigh_node
  */
@@ -234,7 +286,7 @@ static void batadv_hardif_neigh_release(struct kref *ref)
 }
 
 /**
- * batadv_hardif_neigh_put - decrement the hardif neighbors refcounter
+ * batadv_hardif_neigh_put() - decrement the hardif neighbors refcounter
  *  and possibly release it
  * @hardif_neigh: hardif neigh neighbor to free
  */
@@ -244,7 +296,7 @@ void batadv_hardif_neigh_put(struct batadv_hardif_neigh_node *hardif_neigh)
 }
 
 /**
- * batadv_neigh_node_release - release neigh_node from lists and queue for
+ * batadv_neigh_node_release() - release neigh_node from lists and queue for
  *  free after rcu grace period
  * @ref: kref pointer of the neigh_node
  */
@@ -269,7 +321,7 @@ static void batadv_neigh_node_release(struct kref *ref)
 }
 
 /**
- * batadv_neigh_node_put - decrement the neighbors refcounter and possibly
+ * batadv_neigh_node_put() - decrement the neighbors refcounter and possibly
  *  release it
  * @neigh_node: neigh neighbor to free
  */
@@ -279,7 +331,7 @@ void batadv_neigh_node_put(struct batadv_neigh_node *neigh_node)
 }
 
 /**
- * batadv_orig_router_get - router to the originator depending on iface
+ * batadv_orig_router_get() - router to the originator depending on iface
  * @orig_node: the orig node for the router
  * @if_outgoing: the interface where the payload packet has been received or
  *  the OGM should be sent to
@@ -312,7 +364,7 @@ batadv_orig_router_get(struct batadv_orig_node *orig_node,
 }
 
 /**
- * batadv_orig_ifinfo_get - find the ifinfo from an orig_node
+ * batadv_orig_ifinfo_get() - find the ifinfo from an orig_node
  * @orig_node: the orig node to be queried
  * @if_outgoing: the interface for which the ifinfo should be acquired
  *
@@ -344,7 +396,7 @@ batadv_orig_ifinfo_get(struct batadv_orig_node *orig_node,
 }
 
 /**
- * batadv_orig_ifinfo_new - search and possibly create an orig_ifinfo object
+ * batadv_orig_ifinfo_new() - search and possibly create an orig_ifinfo object
  * @orig_node: the orig node to be queried
  * @if_outgoing: the interface for which the ifinfo should be acquired
  *
@@ -358,7 +410,7 @@ struct batadv_orig_ifinfo *
 batadv_orig_ifinfo_new(struct batadv_orig_node *orig_node,
 		       struct batadv_hard_iface *if_outgoing)
 {
-	struct batadv_orig_ifinfo *orig_ifinfo = NULL;
+	struct batadv_orig_ifinfo *orig_ifinfo;
 	unsigned long reset_time;
 
 	spin_lock_bh(&orig_node->neigh_list_lock);
@@ -380,6 +432,7 @@ batadv_orig_ifinfo_new(struct batadv_orig_node *orig_node,
 	orig_ifinfo->if_outgoing = if_outgoing;
 	INIT_HLIST_NODE(&orig_ifinfo->list);
 	kref_init(&orig_ifinfo->refcount);
+
 	kref_get(&orig_ifinfo->refcount);
 	hlist_add_head_rcu(&orig_ifinfo->list,
 			   &orig_node->ifinfo_list);
@@ -389,7 +442,7 @@ out:
 }
 
 /**
- * batadv_neigh_ifinfo_get - find the ifinfo from an neigh_node
+ * batadv_neigh_ifinfo_get() - find the ifinfo from an neigh_node
  * @neigh: the neigh node to be queried
  * @if_outgoing: the interface for which the ifinfo should be acquired
  *
@@ -422,7 +475,7 @@ batadv_neigh_ifinfo_get(struct batadv_neigh_node *neigh,
 }
 
 /**
- * batadv_neigh_ifinfo_new - search and possibly create an neigh_ifinfo object
+ * batadv_neigh_ifinfo_new() - search and possibly create an neigh_ifinfo object
  * @neigh: the neigh node to be queried
  * @if_outgoing: the interface for which the ifinfo should be acquired
  *
@@ -453,9 +506,9 @@ batadv_neigh_ifinfo_new(struct batadv_neigh_node *neigh,
 
 	INIT_HLIST_NODE(&neigh_ifinfo->list);
 	kref_init(&neigh_ifinfo->refcount);
-	kref_get(&neigh_ifinfo->refcount);
 	neigh_ifinfo->if_outgoing = if_outgoing;
 
+	kref_get(&neigh_ifinfo->refcount);
 	hlist_add_head_rcu(&neigh_ifinfo->list, &neigh->ifinfo_list);
 
 out:
@@ -465,7 +518,7 @@ out:
 }
 
 /**
- * batadv_neigh_node_get - retrieve a neighbour from the list
+ * batadv_neigh_node_get() - retrieve a neighbour from the list
  * @orig_node: originator which the neighbour belongs to
  * @hard_iface: the interface where this neighbour is connected to
  * @addr: the address of the neighbour
@@ -502,18 +555,20 @@ batadv_neigh_node_get(const struct batadv_orig_node *orig_node,
 }
 
 /**
- * batadv_hardif_neigh_create - create a hardif neighbour node
+ * batadv_hardif_neigh_create() - create a hardif neighbour node
  * @hard_iface: the interface this neighbour is connected to
  * @neigh_addr: the interface address of the neighbour to retrieve
+ * @orig_node: originator object representing the neighbour
  *
  * Return: the hardif neighbour node if found or created or NULL otherwise.
  */
 static struct batadv_hardif_neigh_node *
 batadv_hardif_neigh_create(struct batadv_hard_iface *hard_iface,
-			   const u8 *neigh_addr)
+			   const u8 *neigh_addr,
+			   struct batadv_orig_node *orig_node)
 {
 	struct batadv_priv *bat_priv = netdev_priv(hard_iface->soft_iface);
-	struct batadv_hardif_neigh_node *hardif_neigh = NULL;
+	struct batadv_hardif_neigh_node *hardif_neigh;
 
 	spin_lock_bh(&hard_iface->neigh_list_lock);
 
@@ -529,6 +584,7 @@ batadv_hardif_neigh_create(struct batadv_hard_iface *hard_iface,
 	kref_get(&hard_iface->refcount);
 	INIT_HLIST_NODE(&hardif_neigh->list);
 	ether_addr_copy(hardif_neigh->addr, neigh_addr);
+	ether_addr_copy(hardif_neigh->orig, orig_node->orig);
 	hardif_neigh->if_incoming = hard_iface;
 	hardif_neigh->last_seen = jiffies;
 
@@ -537,7 +593,7 @@ batadv_hardif_neigh_create(struct batadv_hard_iface *hard_iface,
 	if (bat_priv->algo_ops->neigh.hardif_init)
 		bat_priv->algo_ops->neigh.hardif_init(hardif_neigh);
 
-	hlist_add_head(&hardif_neigh->list, &hard_iface->neigh_list);
+	hlist_add_head_rcu(&hardif_neigh->list, &hard_iface->neigh_list);
 
 out:
 	spin_unlock_bh(&hard_iface->neigh_list_lock);
@@ -545,29 +601,31 @@ out:
 }
 
 /**
- * batadv_hardif_neigh_get_or_create - retrieve or create a hardif neighbour
+ * batadv_hardif_neigh_get_or_create() - retrieve or create a hardif neighbour
  *  node
  * @hard_iface: the interface this neighbour is connected to
  * @neigh_addr: the interface address of the neighbour to retrieve
+ * @orig_node: originator object representing the neighbour
  *
  * Return: the hardif neighbour node if found or created or NULL otherwise.
  */
 static struct batadv_hardif_neigh_node *
 batadv_hardif_neigh_get_or_create(struct batadv_hard_iface *hard_iface,
-				  const u8 *neigh_addr)
+				  const u8 *neigh_addr,
+				  struct batadv_orig_node *orig_node)
 {
-	struct batadv_hardif_neigh_node *hardif_neigh = NULL;
+	struct batadv_hardif_neigh_node *hardif_neigh;
 
 	/* first check without locking to avoid the overhead */
 	hardif_neigh = batadv_hardif_neigh_get(hard_iface, neigh_addr);
 	if (hardif_neigh)
 		return hardif_neigh;
 
-	return batadv_hardif_neigh_create(hard_iface, neigh_addr);
+	return batadv_hardif_neigh_create(hard_iface, neigh_addr, orig_node);
 }
 
 /**
- * batadv_hardif_neigh_get - retrieve a hardif neighbour from the list
+ * batadv_hardif_neigh_get() - retrieve a hardif neighbour from the list
  * @hard_iface: the interface where this neighbour is connected to
  * @neigh_addr: the address of the neighbour
  *
@@ -599,7 +657,7 @@ batadv_hardif_neigh_get(const struct batadv_hard_iface *hard_iface,
 }
 
 /**
- * batadv_neigh_node_create - create a neigh node object
+ * batadv_neigh_node_create() - create a neigh node object
  * @orig_node: originator object representing the neighbour
  * @hard_iface: the interface where the neighbour is connected to
  * @neigh_addr: the mac address of the neighbour interface
@@ -623,7 +681,7 @@ batadv_neigh_node_create(struct batadv_orig_node *orig_node,
 		goto out;
 
 	hardif_neigh = batadv_hardif_neigh_get_or_create(hard_iface,
-							 neigh_addr);
+							 neigh_addr, orig_node);
 	if (!hardif_neigh)
 		goto out;
 
@@ -647,8 +705,8 @@ batadv_neigh_node_create(struct batadv_orig_node *orig_node,
 
 	/* extra reference for return */
 	kref_init(&neigh_node->refcount);
-	kref_get(&neigh_node->refcount);
 
+	kref_get(&neigh_node->refcount);
 	hlist_add_head_rcu(&neigh_node->list, &orig_node->neigh_list);
 
 	batadv_dbg(BATADV_DBG_BATMAN, orig_node->bat_priv,
@@ -664,7 +722,7 @@ out:
 }
 
 /**
- * batadv_neigh_node_get_or_create - retrieve or create a neigh node object
+ * batadv_neigh_node_get_or_create() - retrieve or create a neigh node object
  * @orig_node: originator object representing the neighbour
  * @hard_iface: the interface where the neighbour is connected to
  * @neigh_addr: the mac address of the neighbour interface
@@ -676,7 +734,7 @@ batadv_neigh_node_get_or_create(struct batadv_orig_node *orig_node,
 				struct batadv_hard_iface *hard_iface,
 				const u8 *neigh_addr)
 {
-	struct batadv_neigh_node *neigh_node = NULL;
+	struct batadv_neigh_node *neigh_node;
 
 	/* first check without locking to avoid the overhead */
 	neigh_node = batadv_neigh_node_get(orig_node, hard_iface, neigh_addr);
@@ -686,8 +744,9 @@ batadv_neigh_node_get_or_create(struct batadv_orig_node *orig_node,
 	return batadv_neigh_node_create(orig_node, hard_iface, neigh_addr);
 }
 
+#ifdef CONFIG_BATMAN_ADV_DEBUGFS
 /**
- * batadv_hardif_neigh_seq_print_text - print the single hop neighbour list
+ * batadv_hardif_neigh_seq_print_text() - print the single hop neighbour list
  * @seq: neighbour table seq_file struct
  * @offset: not used
  *
@@ -719,9 +778,87 @@ int batadv_hardif_neigh_seq_print_text(struct seq_file *seq, void *offset)
 	bat_priv->algo_ops->neigh.print(bat_priv, seq);
 	return 0;
 }
+#endif
 
 /**
- * batadv_orig_ifinfo_release - release orig_ifinfo from lists and queue for
+ * batadv_hardif_neigh_dump() - Dump to netlink the neighbor infos for a
+ *  specific outgoing interface
+ * @msg: message to dump into
+ * @cb: parameters for the dump
+ *
+ * Return: 0 or error value
+ */
+int batadv_hardif_neigh_dump(struct sk_buff *msg, struct netlink_callback *cb)
+{
+	struct net *net = sock_net(cb->skb->sk);
+	struct net_device *soft_iface;
+	struct net_device *hard_iface = NULL;
+	struct batadv_hard_iface *hardif = BATADV_IF_DEFAULT;
+	struct batadv_priv *bat_priv;
+	struct batadv_hard_iface *primary_if = NULL;
+	int ret;
+	int ifindex, hard_ifindex;
+
+	ifindex = batadv_netlink_get_ifindex(cb->nlh, BATADV_ATTR_MESH_IFINDEX);
+	if (!ifindex)
+		return -EINVAL;
+
+	soft_iface = dev_get_by_index(net, ifindex);
+	if (!soft_iface || !batadv_softif_is_valid(soft_iface)) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	bat_priv = netdev_priv(soft_iface);
+
+	primary_if = batadv_primary_if_get_selected(bat_priv);
+	if (!primary_if || primary_if->if_status != BATADV_IF_ACTIVE) {
+		ret = -ENOENT;
+		goto out;
+	}
+
+	hard_ifindex = batadv_netlink_get_ifindex(cb->nlh,
+						  BATADV_ATTR_HARD_IFINDEX);
+	if (hard_ifindex) {
+		hard_iface = dev_get_by_index(net, hard_ifindex);
+		if (hard_iface)
+			hardif = batadv_hardif_get_by_netdev(hard_iface);
+
+		if (!hardif) {
+			ret = -ENODEV;
+			goto out;
+		}
+
+		if (hardif->soft_iface != soft_iface) {
+			ret = -ENOENT;
+			goto out;
+		}
+	}
+
+	if (!bat_priv->algo_ops->neigh.dump) {
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+
+	bat_priv->algo_ops->neigh.dump(msg, cb, bat_priv, hardif);
+
+	ret = msg->len;
+
+ out:
+	if (hardif)
+		batadv_hardif_put(hardif);
+	if (hard_iface)
+		dev_put(hard_iface);
+	if (primary_if)
+		batadv_hardif_put(primary_if);
+	if (soft_iface)
+		dev_put(soft_iface);
+
+	return ret;
+}
+
+/**
+ * batadv_orig_ifinfo_release() - release orig_ifinfo from lists and queue for
  *  free after rcu grace period
  * @ref: kref pointer of the orig_ifinfo
  */
@@ -744,7 +881,7 @@ static void batadv_orig_ifinfo_release(struct kref *ref)
 }
 
 /**
- * batadv_orig_ifinfo_put - decrement the refcounter and possibly release
+ * batadv_orig_ifinfo_put() - decrement the refcounter and possibly release
  *  the orig_ifinfo
  * @orig_ifinfo: the orig_ifinfo object to release
  */
@@ -754,7 +891,7 @@ void batadv_orig_ifinfo_put(struct batadv_orig_ifinfo *orig_ifinfo)
 }
 
 /**
- * batadv_orig_node_free_rcu - free the orig_node
+ * batadv_orig_node_free_rcu() - free the orig_node
  * @rcu: rcu pointer of the orig_node
  */
 static void batadv_orig_node_free_rcu(struct rcu_head *rcu)
@@ -775,7 +912,7 @@ static void batadv_orig_node_free_rcu(struct rcu_head *rcu)
 }
 
 /**
- * batadv_orig_node_release - release orig_node from lists and queue for
+ * batadv_orig_node_release() - release orig_node from lists and queue for
  *  free after rcu grace period
  * @ref: kref pointer of the orig_node
  */
@@ -826,7 +963,7 @@ static void batadv_orig_node_release(struct kref *ref)
 }
 
 /**
- * batadv_orig_node_put - decrement the orig node refcounter and possibly
+ * batadv_orig_node_put() - decrement the orig node refcounter and possibly
  *  release it
  * @orig_node: the orig node to free
  */
@@ -835,6 +972,10 @@ void batadv_orig_node_put(struct batadv_orig_node *orig_node)
 	kref_put(&orig_node->refcount, batadv_orig_node_release);
 }
 
+/**
+ * batadv_originator_free() - Free all originator structures
+ * @bat_priv: the bat priv with all the soft interface information
+ */
 void batadv_originator_free(struct batadv_priv *bat_priv)
 {
 	struct batadv_hashtable *hash = bat_priv->orig_hash;
@@ -868,7 +1009,7 @@ void batadv_originator_free(struct batadv_priv *bat_priv)
 }
 
 /**
- * batadv_orig_node_new - creates a new orig_node
+ * batadv_orig_node_new() - creates a new orig_node
  * @bat_priv: the bat priv with all the soft interface information
  * @addr: the mac address of the originator
  *
@@ -905,7 +1046,6 @@ struct batadv_orig_node *batadv_orig_node_new(struct batadv_priv *bat_priv,
 
 	/* extra reference for return */
 	kref_init(&orig_node->refcount);
-	kref_get(&orig_node->refcount);
 
 	orig_node->bat_priv = bat_priv;
 	ether_addr_copy(orig_node->orig, addr);
@@ -936,7 +1076,7 @@ struct batadv_orig_node *batadv_orig_node_new(struct batadv_priv *bat_priv,
 	batadv_orig_node_vlan_put(vlan);
 
 	for (i = 0; i < BATADV_FRAG_BUFFER_COUNT; i++) {
-		INIT_HLIST_HEAD(&orig_node->fragments[i].head);
+		INIT_HLIST_HEAD(&orig_node->fragments[i].fragment_list);
 		spin_lock_init(&orig_node->fragments[i].lock);
 		orig_node->fragments[i].size = 0;
 	}
@@ -948,7 +1088,7 @@ free_orig_node:
 }
 
 /**
- * batadv_purge_neigh_ifinfo - purge obsolete ifinfo entries from neighbor
+ * batadv_purge_neigh_ifinfo() - purge obsolete ifinfo entries from neighbor
  * @bat_priv: the bat priv with all the soft interface information
  * @neigh: orig node which is to be checked
  */
@@ -972,9 +1112,9 @@ batadv_purge_neigh_ifinfo(struct batadv_priv *bat_priv,
 			continue;
 
 		/* don't purge if the interface is not (going) down */
-		if ((if_outgoing->if_status != BATADV_IF_INACTIVE) &&
-		    (if_outgoing->if_status != BATADV_IF_NOT_IN_USE) &&
-		    (if_outgoing->if_status != BATADV_IF_TO_BE_REMOVED))
+		if (if_outgoing->if_status != BATADV_IF_INACTIVE &&
+		    if_outgoing->if_status != BATADV_IF_NOT_IN_USE &&
+		    if_outgoing->if_status != BATADV_IF_TO_BE_REMOVED)
 			continue;
 
 		batadv_dbg(BATADV_DBG_BATMAN, bat_priv,
@@ -989,7 +1129,7 @@ batadv_purge_neigh_ifinfo(struct batadv_priv *bat_priv,
 }
 
 /**
- * batadv_purge_orig_ifinfo - purge obsolete ifinfo entries from originator
+ * batadv_purge_orig_ifinfo() - purge obsolete ifinfo entries from originator
  * @bat_priv: the bat priv with all the soft interface information
  * @orig_node: orig node which is to be checked
  *
@@ -1016,9 +1156,9 @@ batadv_purge_orig_ifinfo(struct batadv_priv *bat_priv,
 			continue;
 
 		/* don't purge if the interface is not (going) down */
-		if ((if_outgoing->if_status != BATADV_IF_INACTIVE) &&
-		    (if_outgoing->if_status != BATADV_IF_NOT_IN_USE) &&
-		    (if_outgoing->if_status != BATADV_IF_TO_BE_REMOVED))
+		if (if_outgoing->if_status != BATADV_IF_INACTIVE &&
+		    if_outgoing->if_status != BATADV_IF_NOT_IN_USE &&
+		    if_outgoing->if_status != BATADV_IF_TO_BE_REMOVED)
 			continue;
 
 		batadv_dbg(BATADV_DBG_BATMAN, bat_priv,
@@ -1041,7 +1181,7 @@ batadv_purge_orig_ifinfo(struct batadv_priv *bat_priv,
 }
 
 /**
- * batadv_purge_orig_neighbors - purges neighbors from originator
+ * batadv_purge_orig_neighbors() - purges neighbors from originator
  * @bat_priv: the bat priv with all the soft interface information
  * @orig_node: orig node which is to be checked
  *
@@ -1065,13 +1205,13 @@ batadv_purge_orig_neighbors(struct batadv_priv *bat_priv,
 		last_seen = neigh_node->last_seen;
 		if_incoming = neigh_node->if_incoming;
 
-		if ((batadv_has_timed_out(last_seen, BATADV_PURGE_TIMEOUT)) ||
-		    (if_incoming->if_status == BATADV_IF_INACTIVE) ||
-		    (if_incoming->if_status == BATADV_IF_NOT_IN_USE) ||
-		    (if_incoming->if_status == BATADV_IF_TO_BE_REMOVED)) {
-			if ((if_incoming->if_status == BATADV_IF_INACTIVE) ||
-			    (if_incoming->if_status == BATADV_IF_NOT_IN_USE) ||
-			    (if_incoming->if_status == BATADV_IF_TO_BE_REMOVED))
+		if (batadv_has_timed_out(last_seen, BATADV_PURGE_TIMEOUT) ||
+		    if_incoming->if_status == BATADV_IF_INACTIVE ||
+		    if_incoming->if_status == BATADV_IF_NOT_IN_USE ||
+		    if_incoming->if_status == BATADV_IF_TO_BE_REMOVED) {
+			if (if_incoming->if_status == BATADV_IF_INACTIVE ||
+			    if_incoming->if_status == BATADV_IF_NOT_IN_USE ||
+			    if_incoming->if_status == BATADV_IF_TO_BE_REMOVED)
 				batadv_dbg(BATADV_DBG_BATMAN, bat_priv,
 					   "neighbor purge: originator %pM, neighbor: %pM, iface: %s\n",
 					   orig_node->orig, neigh_node->addr,
@@ -1099,7 +1239,7 @@ batadv_purge_orig_neighbors(struct batadv_priv *bat_priv,
 }
 
 /**
- * batadv_find_best_neighbor - finds the best neighbor after purging
+ * batadv_find_best_neighbor() - finds the best neighbor after purging
  * @bat_priv: the bat priv with all the soft interface information
  * @orig_node: orig node which is to be checked
  * @if_outgoing: the interface for which the metric should be compared
@@ -1134,7 +1274,7 @@ batadv_find_best_neighbor(struct batadv_priv *bat_priv,
 }
 
 /**
- * batadv_purge_orig_node - purges obsolete information from an orig_node
+ * batadv_purge_orig_node() - purges obsolete information from an orig_node
  * @bat_priv: the bat priv with all the soft interface information
  * @orig_node: orig node which is to be checked
  *
@@ -1251,11 +1391,24 @@ static void batadv_purge_orig(struct work_struct *work)
 			   msecs_to_jiffies(BATADV_ORIG_WORK_PERIOD));
 }
 
+/**
+ * batadv_purge_orig_ref() - Purge all outdated originators
+ * @bat_priv: the bat priv with all the soft interface information
+ */
 void batadv_purge_orig_ref(struct batadv_priv *bat_priv)
 {
 	_batadv_purge_orig(bat_priv);
 }
 
+#ifdef CONFIG_BATMAN_ADV_DEBUGFS
+
+/**
+ * batadv_orig_seq_print_text() - Print the originator table in a seq file
+ * @seq: seq file to print on
+ * @offset: not used
+ *
+ * Return: always 0
+ */
 int batadv_orig_seq_print_text(struct seq_file *seq, void *offset)
 {
 	struct net_device *net_dev = (struct net_device *)seq->private;
@@ -1285,7 +1438,7 @@ int batadv_orig_seq_print_text(struct seq_file *seq, void *offset)
 }
 
 /**
- * batadv_orig_hardif_seq_print_text - writes originator infos for a specific
+ * batadv_orig_hardif_seq_print_text() - writes originator infos for a specific
  *  outgoing interface
  * @seq: debugfs table seq_file struct
  * @offset: not used
@@ -1329,9 +1482,94 @@ out:
 		batadv_hardif_put(hard_iface);
 	return 0;
 }
+#endif
 
+/**
+ * batadv_orig_dump() - Dump to netlink the originator infos for a specific
+ *  outgoing interface
+ * @msg: message to dump into
+ * @cb: parameters for the dump
+ *
+ * Return: 0 or error value
+ */
+int batadv_orig_dump(struct sk_buff *msg, struct netlink_callback *cb)
+{
+	struct net *net = sock_net(cb->skb->sk);
+	struct net_device *soft_iface;
+	struct net_device *hard_iface = NULL;
+	struct batadv_hard_iface *hardif = BATADV_IF_DEFAULT;
+	struct batadv_priv *bat_priv;
+	struct batadv_hard_iface *primary_if = NULL;
+	int ret;
+	int ifindex, hard_ifindex;
+
+	ifindex = batadv_netlink_get_ifindex(cb->nlh, BATADV_ATTR_MESH_IFINDEX);
+	if (!ifindex)
+		return -EINVAL;
+
+	soft_iface = dev_get_by_index(net, ifindex);
+	if (!soft_iface || !batadv_softif_is_valid(soft_iface)) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	bat_priv = netdev_priv(soft_iface);
+
+	primary_if = batadv_primary_if_get_selected(bat_priv);
+	if (!primary_if || primary_if->if_status != BATADV_IF_ACTIVE) {
+		ret = -ENOENT;
+		goto out;
+	}
+
+	hard_ifindex = batadv_netlink_get_ifindex(cb->nlh,
+						  BATADV_ATTR_HARD_IFINDEX);
+	if (hard_ifindex) {
+		hard_iface = dev_get_by_index(net, hard_ifindex);
+		if (hard_iface)
+			hardif = batadv_hardif_get_by_netdev(hard_iface);
+
+		if (!hardif) {
+			ret = -ENODEV;
+			goto out;
+		}
+
+		if (hardif->soft_iface != soft_iface) {
+			ret = -ENOENT;
+			goto out;
+		}
+	}
+
+	if (!bat_priv->algo_ops->orig.dump) {
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+
+	bat_priv->algo_ops->orig.dump(msg, cb, bat_priv, hardif);
+
+	ret = msg->len;
+
+ out:
+	if (hardif)
+		batadv_hardif_put(hardif);
+	if (hard_iface)
+		dev_put(hard_iface);
+	if (primary_if)
+		batadv_hardif_put(primary_if);
+	if (soft_iface)
+		dev_put(soft_iface);
+
+	return ret;
+}
+
+/**
+ * batadv_orig_hash_add_if() - Add interface to originators in orig_hash
+ * @hard_iface: hard interface to add (already slave of the soft interface)
+ * @max_if_num: new number of interfaces
+ *
+ * Return: 0 on success or negative error number in case of failure
+ */
 int batadv_orig_hash_add_if(struct batadv_hard_iface *hard_iface,
-			    int max_if_num)
+			    unsigned int max_if_num)
 {
 	struct batadv_priv *bat_priv = netdev_priv(hard_iface->soft_iface);
 	struct batadv_algo_ops *bao = bat_priv->algo_ops;
@@ -1365,8 +1603,15 @@ err:
 	return -ENOMEM;
 }
 
+/**
+ * batadv_orig_hash_del_if() - Remove interface from originators in orig_hash
+ * @hard_iface: hard interface to remove (still slave of the soft interface)
+ * @max_if_num: new number of interfaces
+ *
+ * Return: 0 on success or negative error number in case of failure
+ */
 int batadv_orig_hash_del_if(struct batadv_hard_iface *hard_iface,
-			    int max_if_num)
+			    unsigned int max_if_num)
 {
 	struct batadv_priv *bat_priv = netdev_priv(hard_iface->soft_iface);
 	struct batadv_hashtable *hash = bat_priv->orig_hash;

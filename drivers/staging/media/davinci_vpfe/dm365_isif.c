@@ -146,9 +146,8 @@ enum v4l2_field vpfe_isif_get_fid(struct vpfe_device *vpfe_dev)
 	u32 field_status;
 
 	field_status = isif_read(isif->isif_cfg.base_addr, MODESET);
-	field_status = (field_status >> DM365_ISIF_MDFS_OFFSET) &
-			DM365_ISIF_MDFS_MASK;
-	return field_status;
+	return (field_status >> DM365_ISIF_MDFS_OFFSET) &
+		DM365_ISIF_MDFS_MASK;
 }
 
 static int
@@ -594,8 +593,7 @@ isif_validate_raw_params(struct vpfe_isif_raw_config *params)
 	ret = isif_validate_dfc_params(&params->dfc);
 	if (ret)
 		return ret;
-	ret = isif_validate_bclamp_params(&params->bclamp);
-	return ret;
+	return isif_validate_bclamp_params(&params->bclamp);
 }
 
 static int isif_set_params(struct v4l2_subdev *sd, void *params)
@@ -1399,14 +1397,9 @@ __isif_get_format(struct vpfe_isif_device *isif,
 		  struct v4l2_subdev_pad_config *cfg, unsigned int pad,
 		  enum v4l2_subdev_format_whence which)
 {
-	if (which == V4L2_SUBDEV_FORMAT_TRY) {
-		struct v4l2_subdev_format fmt;
-
-		fmt.pad = pad;
-		fmt.which = which;
-
+	if (which == V4L2_SUBDEV_FORMAT_TRY)
 		return v4l2_subdev_get_try_format(&isif->subdev, cfg, pad);
-	}
+
 	return &isif->formats[pad];
 }
 

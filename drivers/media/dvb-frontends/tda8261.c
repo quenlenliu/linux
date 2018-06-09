@@ -23,7 +23,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 
-#include "dvb_frontend.h"
+#include <media/dvb_frontend.h>
 #include "tda8261.h"
 
 struct tda8261_state {
@@ -152,16 +152,15 @@ static int tda8261_set_params(struct dvb_frontend *fe)
 	return 0;
 }
 
-static int tda8261_release(struct dvb_frontend *fe)
+static void tda8261_release(struct dvb_frontend *fe)
 {
 	struct tda8261_state *state = fe->tuner_priv;
 
 	fe->tuner_priv = NULL;
 	kfree(state);
-	return 0;
 }
 
-static struct dvb_tuner_ops tda8261_ops = {
+static const struct dvb_tuner_ops tda8261_ops = {
 
 	.info = {
 		.name		= "TDA8261",

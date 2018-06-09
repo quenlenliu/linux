@@ -130,7 +130,7 @@ static int i2c_arbitrator_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	muxc = i2c_mux_alloc(NULL, dev, 1, sizeof(*arb), 0,
+	muxc = i2c_mux_alloc(NULL, dev, 1, sizeof(*arb), I2C_MUX_ARBITRATOR,
 			     i2c_arbitrator_select, i2c_arbitrator_deselect);
 	if (!muxc)
 		return -ENOMEM;
@@ -202,10 +202,8 @@ static int i2c_arbitrator_probe(struct platform_device *pdev)
 
 	/* Actually add the mux adapter */
 	ret = i2c_mux_add_adapter(muxc, 0, 0, 0);
-	if (ret) {
-		dev_err(dev, "Failed to add adapter\n");
+	if (ret)
 		i2c_put_adapter(muxc->parent);
-	}
 
 	return ret;
 }

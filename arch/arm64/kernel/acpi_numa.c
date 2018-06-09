@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * ACPI 5.1 based NUMA setup for ARM64
  * Lots of code was borrowed from arch/x86/mm/srat.c
@@ -105,8 +106,10 @@ int __init arm64_acpi_numa_init(void)
 	int ret;
 
 	ret = acpi_numa_init();
-	if (ret)
+	if (ret) {
+		pr_info("Failed to initialise from firmware\n");
 		return ret;
+	}
 
 	return srat_disabled() ? -EINVAL : 0;
 }

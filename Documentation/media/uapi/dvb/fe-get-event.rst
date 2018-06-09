@@ -11,43 +11,24 @@ Name
 
 FE_GET_EVENT
 
+.. attention:: This ioctl is deprecated.
+
 
 Synopsis
 ========
 
-.. cpp:function:: int  ioctl(int fd, int request = QPSK_GET_EVENT, struct dvb_frontend_event *ev)
+.. c:function:: int  ioctl(int fd, FE_GET_EVENT, struct dvb_frontend_event *ev)
+    :name: FE_GET_EVENT
 
 
 Arguments
 =========
 
-.. flat-table::
-    :header-rows:  0
-    :stub-columns: 0
+``fd``
+    File descriptor returned by :c:func:`open() <dvb-fe-open>`.
 
-
-    -  .. row 1
-
-       -  int fd
-
-       -  File descriptor returned by a previous call to open().
-
-    -  .. row 2
-
-       -  int request
-
-       -  Equals :ref:`FE_GET_EVENT` for this command.
-
-    -  .. row 3
-
-       -  struct dvb_frontend_event \*ev
-
-       -  Points to the location where the event,
-
-    -  .. row 4
-
-       -
-       -  if any, is to be stored.
+``ev``
+    Points to the location where the event, if any, is to be stored.
 
 
 Description
@@ -63,10 +44,10 @@ an event becomes available.
 Return Value
 ============
 
-On success 0 is returned, on error -1 and the ``errno`` variable is set
-appropriately. The generic error codes are described at the
-:ref:`Generic Error Codes <gen-errors>` chapter.
+On success 0 is returned.
 
+On error -1 is returned, and the ``errno`` variable is set
+appropriately.
 
 
 .. flat-table::
@@ -85,3 +66,6 @@ appropriately. The generic error codes are described at the
        -  ``EOVERFLOW``
 
        -  Overflow in event queue - one or more events were lost.
+
+Generic error codes are described at the
+:ref:`Generic Error Codes <gen-errors>` chapter.

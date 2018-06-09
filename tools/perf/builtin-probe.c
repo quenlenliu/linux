@@ -58,6 +58,7 @@ static struct {
 	struct line_range line_range;
 	char *target;
 	struct strfilter *filter;
+	struct nsinfo *nsi;
 } params;
 
 /* Parse an event definition. Note that any error must die. */
@@ -79,6 +80,9 @@ static int parse_probe_event(const char *str)
 			return -ENOMEM;
 		params.target_used = true;
 	}
+
+	if (params.nsi)
+		pev->nsi = nsinfo__get(params.nsi);
 
 	/* Parse a perf-probe command into event */
 	ret = parse_perf_probe_command(str, pev);
@@ -189,7 +193,7 @@ static int opt_set_target(const struct option *opt, const char *str,
 
 		/* Expand given path to absolute path, except for modulename */
 		if (params.uprobes || strchr(str, '/')) {
-			tmp = realpath(str, NULL);
+			tmp = nsinfo__realpath(str, params.nsi);
 			if (!tmp) {
 				pr_warning("Failed to get the absolute path of %s: %m\n", str);
 				return ret;
@@ -207,6 +211,34 @@ static int opt_set_target(const struct option *opt, const char *str,
 
 	return ret;
 }
+
+static int opt_set_target_ns(const struct option *opt __maybe_unused,
+			     const char *str, int unset __maybe_unused)
+{
+	int ret = -ENOENT;
+	pid_t ns_pid;
+	struct nsinfo *nsip;
+
+	if (str) {
+		errno = 0;
+		ns_pid = (pid_t)strtol(str, NULL, 10);
+		if (errno != 0) {
+			ret = -errno;
+			pr_warning("Failed to parse %s as a pid: %s\n", str,
+				   strerror(errno));
+			return ret;
+		}
+		nsip = nsinfo__new(ns_pid);
+		if (nsip && nsip->need_setns)
+			params.nsi = nsinfo__get(nsip);
+		nsinfo__put(nsip);
+
+		ret = 0;
+	}
+
+	return ret;
+}
+
 
 /* Command option callbacks */
 
@@ -299,6 +331,7 @@ static void cleanup_params(void)
 	line_range__clear(&params.line_range);
 	free(params.target);
 	strfilter__delete(params.filter);
+	nsinfo__put(params.nsi);
 	memset(&params, 0, sizeof(params));
 }
 
@@ -325,6 +358,11 @@ static int perf_add_probe_events(struct perf_probe_event *pevs, int npevs)
 	ret = convert_perf_probe_events(pevs, npevs);
 	if (ret < 0)
 		goto out_cleanup;
+
+	if (params.command == 'D') {	/* it shows definition */
+		ret = show_probe_trace_events(pevs, npevs);
+		goto out_cleanup;
+	}
 
 	ret = apply_perf_probe_events(pevs, npevs);
 	if (ret < 0)
@@ -378,7 +416,7 @@ static int del_perf_probe_caches(struct strfilter *filter)
 	}
 
 	strlist__for_each_entry(nd, bidlist) {
-		cache = probe_cache__new(nd->s);
+		cache = probe_cache__new(nd->s, NULL);
 		if (!cache)
 			continue;
 		if (probe_cache__filter_purge(cache, filter) < 0 ||
@@ -437,9 +475,9 @@ static int perf_del_probe_events(struct strfilter *filter)
 	}
 
 	if (ret == -ENOENT && ret2 == -ENOENT)
-		pr_debug("\"%s\" does not hit any event.\n", str);
-		/* Note that this is silently ignored */
-	ret = 0;
+		pr_warning("\"%s\" does not hit any event.\n", str);
+	else
+		ret = 0;
 
 error:
 	if (kfd >= 0)
@@ -454,8 +492,16 @@ out:
 	return ret;
 }
 
+#ifdef HAVE_DWARF_SUPPORT
+#define PROBEDEF_STR	\
+	"[EVENT=]FUNC[@SRC][+OFF|%return|:RL|;PT]|SRC:AL|SRC;PT [[NAME=]ARG ...]"
+#else
+#define PROBEDEF_STR	"[EVENT=]FUNC[+OFF|%return] [[NAME=]ARG ...]"
+#endif
+
+
 static int
-__cmd_probe(int argc, const char **argv, const char *prefix __maybe_unused)
+__cmd_probe(int argc, const char **argv)
 {
 	const char * const probe_usage[] = {
 		"perf probe [<options>] 'PROBEDEF' ['PROBEDEF' ...]",
@@ -473,19 +519,13 @@ __cmd_probe(int argc, const char **argv, const char *prefix __maybe_unused)
 	OPT_INCR('v', "verbose", &verbose,
 		    "be more verbose (show parsed arguments, etc)"),
 	OPT_BOOLEAN('q', "quiet", &params.quiet,
-		    "be quiet (do not show any mesages)"),
+		    "be quiet (do not show any messages)"),
 	OPT_CALLBACK_DEFAULT('l', "list", NULL, "[GROUP:]EVENT",
 			     "list up probe events",
 			     opt_set_filter_with_command, DEFAULT_LIST_FILTER),
 	OPT_CALLBACK('d', "del", NULL, "[GROUP:]EVENT", "delete a probe event.",
 		     opt_set_filter_with_command),
-	OPT_CALLBACK('a', "add", NULL,
-#ifdef HAVE_DWARF_SUPPORT
-		"[EVENT=]FUNC[@SRC][+OFF|%return|:RL|;PT]|SRC:AL|SRC;PT"
-		" [[NAME=]ARG ...]",
-#else
-		"[EVENT=]FUNC[+OFF|%return] [[NAME=]ARG ...]",
-#endif
+	OPT_CALLBACK('a', "add", NULL, PROBEDEF_STR,
 		"probe point definition, where\n"
 		"\t\tGROUP:\tGroup name (optional)\n"
 		"\t\tEVENT:\tEvent name\n"
@@ -502,6 +542,9 @@ __cmd_probe(int argc, const char **argv, const char *prefix __maybe_unused)
 #else
 		"\t\tARG:\tProbe argument (kprobe-tracer argument format.)\n",
 #endif
+		opt_add_probe_event),
+	OPT_CALLBACK('D', "definition", NULL, PROBEDEF_STR,
+		"Show trace event definition of given traceevent for k/uprobe_events.",
 		opt_add_probe_event),
 	OPT_BOOLEAN('f', "force", &probe_conf.force_add, "forcibly add events"
 		    " with existing name"),
@@ -542,12 +585,17 @@ __cmd_probe(int argc, const char **argv, const char *prefix __maybe_unused)
 	OPT_BOOLEAN(0, "demangle-kernel", &symbol_conf.demangle_kernel,
 		    "Enable kernel symbol demangling"),
 	OPT_BOOLEAN(0, "cache", &probe_conf.cache, "Manipulate probe cache"),
+	OPT_STRING(0, "symfs", &symbol_conf.symfs, "directory",
+		   "Look for files with symbols relative to this directory"),
+	OPT_CALLBACK(0, "target-ns", NULL, "pid",
+		     "target pid for namespace contexts", opt_set_target_ns),
 	OPT_END()
 	};
 	int ret;
 
 	set_option_flag(options, 'a', "add", PARSE_OPT_EXCLUSIVE);
 	set_option_flag(options, 'd', "del", PARSE_OPT_EXCLUSIVE);
+	set_option_flag(options, 'D', "definition", PARSE_OPT_EXCLUSIVE);
 	set_option_flag(options, 'l', "list", PARSE_OPT_EXCLUSIVE);
 #ifdef HAVE_DWARF_SUPPORT
 	set_option_flag(options, 'L', "line", PARSE_OPT_EXCLUSIVE);
@@ -600,6 +648,14 @@ __cmd_probe(int argc, const char **argv, const char *prefix __maybe_unused)
 	 */
 	symbol_conf.try_vmlinux_path = (symbol_conf.vmlinux_name == NULL);
 
+	/*
+	 * Except for --list, --del and --add, other command doesn't depend
+	 * nor change running kernel. So if user gives offline vmlinux,
+	 * ignore its buildid.
+	 */
+	if (!strchr("lda", params.command) && symbol_conf.vmlinux_name)
+		symbol_conf.ignore_vmlinux_buildid = true;
+
 	switch (params.command) {
 	case 'l':
 		if (params.uprobes) {
@@ -613,15 +669,15 @@ __cmd_probe(int argc, const char **argv, const char *prefix __maybe_unused)
 			pr_err_with_code("  Error: Failed to show event list.", ret);
 		return ret;
 	case 'F':
-		ret = show_available_funcs(params.target, params.filter,
-					params.uprobes);
+		ret = show_available_funcs(params.target, params.nsi,
+					   params.filter, params.uprobes);
 		if (ret < 0)
 			pr_err_with_code("  Error: Failed to show functions.", ret);
 		return ret;
 #ifdef HAVE_DWARF_SUPPORT
 	case 'L':
 		ret = show_line_range(&params.line_range, params.target,
-				      params.uprobes);
+				      params.nsi, params.uprobes);
 		if (ret < 0)
 			pr_err_with_code("  Error: Failed to show lines.", ret);
 		return ret;
@@ -643,7 +699,9 @@ __cmd_probe(int argc, const char **argv, const char *prefix __maybe_unused)
 			return ret;
 		}
 		break;
+	case 'D':
 	case 'a':
+
 		/* Ensure the last given target is used */
 		if (params.target && !params.target_used) {
 			pr_err("  Error: -x/-m must follow the probe definitions.\n");
@@ -664,13 +722,13 @@ __cmd_probe(int argc, const char **argv, const char *prefix __maybe_unused)
 	return 0;
 }
 
-int cmd_probe(int argc, const char **argv, const char *prefix)
+int cmd_probe(int argc, const char **argv)
 {
 	int ret;
 
 	ret = init_params();
 	if (!ret) {
-		ret = __cmd_probe(argc, argv, prefix);
+		ret = __cmd_probe(argc, argv);
 		cleanup_params();
 	}
 

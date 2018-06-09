@@ -58,6 +58,7 @@ struct lpass_data {
 	/* 8016 specific */
 	struct clk *pcnoc_mport_clk;
 	struct clk *pcnoc_sway_clk;
+
 };
 
 /* Vairant data per each SOC */
@@ -81,7 +82,7 @@ struct lpass_variant {
 	 **/
 	u32	dmactl_audif_start;
 	u32	wrdma_channel_start;
-	/* SOC specific intialization like clocks */
+	/* SOC specific initialization like clocks */
 	int (*init)(struct platform_device *pdev);
 	int (*exit)(struct platform_device *pdev);
 	int (*alloc_dma_channel)(struct lpass_data *data, int direction);
@@ -90,6 +91,8 @@ struct lpass_variant {
 	/* SOC specific dais */
 	struct snd_soc_dai_driver *dai_driver;
 	int num_dai;
+	const char * const *dai_osr_clk_names;
+	const char * const *dai_bit_clk_names;
 };
 
 /* register the platform driver from the CPU DAI driver */

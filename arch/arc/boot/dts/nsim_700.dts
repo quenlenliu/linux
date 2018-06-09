@@ -10,13 +10,14 @@
 /include/ "skeleton.dtsi"
 
 / {
+	model = "snps,nsim";
 	compatible = "snps,nsim";
 	#address-cells = <1>;
 	#size-cells = <1>;
 	interrupt-parent = <&core_intc>;
 
 	chosen {
-		bootargs = "earlycon=arc_uart,mmio32,0xc0fc1000,115200n8 console=ttyARC0,115200n8";
+		bootargs = "earlycon=arc_uart,mmio32,0xc0fc1000,115200n8 console=ttyARC0,115200n8 print-fatal-signals=1";
 	};
 
 	aliases {
@@ -68,7 +69,7 @@
 			};
 		};
 
-		arcpmu0: pmu {
+		arcpct0: pct {
 			compatible = "snps,arc700-pct";
 		};
 	};

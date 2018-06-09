@@ -31,6 +31,7 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
+#include <linux/iversion.h>
 #include "exofs.h"
 
 static inline unsigned exofs_chunk_size(struct inode *inode)
@@ -60,7 +61,7 @@ static int exofs_commit_chunk(struct page *page, loff_t pos, unsigned len)
 	struct inode *dir = mapping->host;
 	int err = 0;
 
-	dir->i_version++;
+	inode_inc_iversion(dir);
 
 	if (!PageUptodate(page))
 		SetPageUptodate(page);
@@ -72,7 +73,7 @@ static int exofs_commit_chunk(struct page *page, loff_t pos, unsigned len)
 	set_page_dirty(page);
 
 	if (IS_DIRSYNC(dir))
-		err = write_one_page(page, 1);
+		err = write_one_page(page);
 	else
 		unlock_page(page);
 
@@ -137,7 +138,7 @@ Espan:
 bad_entry:
 	EXOFS_ERR(
 		"ERROR [exofs_check_page]: bad entry in directory(0x%lx): %s - "
-		"offset=%lu, inode=0x%llu, rec_len=%d, name_len=%d\n",
+		"offset=%lu, inode=0x%llx, rec_len=%d, name_len=%d\n",
 		dir->i_ino, error, (page->index<<PAGE_SHIFT)+offs,
 		_LLU(le64_to_cpu(p->inode_no)),
 		rec_len, p->name_len);
@@ -241,7 +242,7 @@ exofs_readdir(struct file *file, struct dir_context *ctx)
 	unsigned long n = pos >> PAGE_SHIFT;
 	unsigned long npages = dir_pages(inode);
 	unsigned chunk_mask = ~(exofs_chunk_size(inode)-1);
-	int need_revalidate = (file->f_version != inode->i_version);
+	bool need_revalidate = !inode_eq_iversion(inode, file->f_version);
 
 	if (pos > inode->i_size - EXOFS_DIR_REC_LEN(1))
 		return 0;
@@ -264,8 +265,8 @@ exofs_readdir(struct file *file, struct dir_context *ctx)
 								chunk_mask);
 				ctx->pos = (n<<PAGE_SHIFT) + offset;
 			}
-			file->f_version = inode->i_version;
-			need_revalidate = 0;
+			file->f_version = inode_query_iversion(inode);
+			need_revalidate = false;
 		}
 		de = (struct exofs_dir_entry *)(kaddr + offset);
 		limit = kaddr + exofs_last_byte(inode, n) -
@@ -405,8 +406,7 @@ int exofs_set_link(struct inode *dir, struct exofs_dir_entry *de,
 	int err;
 
 	lock_page(page);
-	err = exofs_write_begin(NULL, page->mapping, pos, len,
-				AOP_FLAG_UNINTERRUPTIBLE, &page, NULL);
+	err = exofs_write_begin(NULL, page->mapping, pos, len, 0, &page, NULL);
 	if (err)
 		EXOFS_ERR("exofs_set_link: exofs_write_begin FAILED => %d\n",
 			  err);
@@ -416,7 +416,7 @@ int exofs_set_link(struct inode *dir, struct exofs_dir_entry *de,
 	if (likely(!err))
 		err = exofs_commit_chunk(page, pos, len);
 	exofs_put_page(page);
-	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
+	dir->i_mtime = dir->i_ctime = current_time(dir);
 	mark_inode_dirty(dir);
 	return err;
 }
@@ -503,7 +503,7 @@ got_it:
 	de->inode_no = cpu_to_le64(inode->i_ino);
 	exofs_set_de_type(de, inode);
 	err = exofs_commit_chunk(page, pos, rec_len);
-	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
+	dir->i_mtime = dir->i_ctime = current_time(dir);
 	mark_inode_dirty(dir);
 	sbi->s_numfiles++;
 
@@ -554,7 +554,7 @@ int exofs_delete_entry(struct exofs_dir_entry *dir, struct page *page)
 	dir->inode_no = 0;
 	if (likely(!err))
 		err = exofs_commit_chunk(page, pos, to - from);
-	inode->i_ctime = inode->i_mtime = CURRENT_TIME;
+	inode->i_ctime = inode->i_mtime = current_time(inode);
 	mark_inode_dirty(inode);
 	sbi->s_numfiles--;
 out:

@@ -107,7 +107,8 @@ static int shadow_and_reallocate_code (struct snd_cs46xx * chip, u32 * data, u32
             
 						dev_dbg(chip->card->dev,
 							"handle_wideop:[2] %05x:%05x addr %04x\n",
-							hival, loval, address);						nreallocated++;
+							hival, loval, address);
+						nreallocated++;
 					} /* wide_opcodes[j] == wide_op */
 				} /* for */
 			} /* mod_type == 0 ... */
@@ -797,7 +798,7 @@ int cs46xx_dsp_proc_init (struct snd_card *card, struct snd_cs46xx *chip)
 
 	if ((entry = snd_info_create_card_entry(card, "dsp", card->proc_root)) != NULL) {
 		entry->content = SNDRV_INFO_CONTENT_TEXT;
-		entry->mode = S_IFDIR | S_IRUGO | S_IXUGO;
+		entry->mode = S_IFDIR | 0555;
       
 		if (snd_info_register(entry) < 0) {
 			snd_info_free_entry(entry);
@@ -813,7 +814,7 @@ int cs46xx_dsp_proc_init (struct snd_card *card, struct snd_cs46xx *chip)
 	if ((entry = snd_info_create_card_entry(card, "spos_symbols", ins->proc_dsp_dir)) != NULL) {
 		entry->content = SNDRV_INFO_CONTENT_TEXT;
 		entry->private_data = chip;
-		entry->mode = S_IFREG | S_IRUGO | S_IWUSR;
+		entry->mode = S_IFREG | 0644;
 		entry->c.text.read = cs46xx_dsp_proc_symbol_table_read;
 		if (snd_info_register(entry) < 0) {
 			snd_info_free_entry(entry);
@@ -825,7 +826,7 @@ int cs46xx_dsp_proc_init (struct snd_card *card, struct snd_cs46xx *chip)
 	if ((entry = snd_info_create_card_entry(card, "spos_modules", ins->proc_dsp_dir)) != NULL) {
 		entry->content = SNDRV_INFO_CONTENT_TEXT;
 		entry->private_data = chip;
-		entry->mode = S_IFREG | S_IRUGO | S_IWUSR;
+		entry->mode = S_IFREG | 0644;
 		entry->c.text.read = cs46xx_dsp_proc_modules_read;
 		if (snd_info_register(entry) < 0) {
 			snd_info_free_entry(entry);
@@ -837,7 +838,7 @@ int cs46xx_dsp_proc_init (struct snd_card *card, struct snd_cs46xx *chip)
 	if ((entry = snd_info_create_card_entry(card, "parameter", ins->proc_dsp_dir)) != NULL) {
 		entry->content = SNDRV_INFO_CONTENT_TEXT;
 		entry->private_data = chip;
-		entry->mode = S_IFREG | S_IRUGO | S_IWUSR;
+		entry->mode = S_IFREG | 0644;
 		entry->c.text.read = cs46xx_dsp_proc_parameter_dump_read;
 		if (snd_info_register(entry) < 0) {
 			snd_info_free_entry(entry);
@@ -849,7 +850,7 @@ int cs46xx_dsp_proc_init (struct snd_card *card, struct snd_cs46xx *chip)
 	if ((entry = snd_info_create_card_entry(card, "sample", ins->proc_dsp_dir)) != NULL) {
 		entry->content = SNDRV_INFO_CONTENT_TEXT;
 		entry->private_data = chip;
-		entry->mode = S_IFREG | S_IRUGO | S_IWUSR;
+		entry->mode = S_IFREG | 0644;
 		entry->c.text.read = cs46xx_dsp_proc_sample_dump_read;
 		if (snd_info_register(entry) < 0) {
 			snd_info_free_entry(entry);
@@ -861,7 +862,7 @@ int cs46xx_dsp_proc_init (struct snd_card *card, struct snd_cs46xx *chip)
 	if ((entry = snd_info_create_card_entry(card, "task_tree", ins->proc_dsp_dir)) != NULL) {
 		entry->content = SNDRV_INFO_CONTENT_TEXT;
 		entry->private_data = chip;
-		entry->mode = S_IFREG | S_IRUGO | S_IWUSR;
+		entry->mode = S_IFREG | 0644;
 		entry->c.text.read = cs46xx_dsp_proc_task_tree_read;
 		if (snd_info_register(entry) < 0) {
 			snd_info_free_entry(entry);
@@ -873,7 +874,7 @@ int cs46xx_dsp_proc_init (struct snd_card *card, struct snd_cs46xx *chip)
 	if ((entry = snd_info_create_card_entry(card, "scb_info", ins->proc_dsp_dir)) != NULL) {
 		entry->content = SNDRV_INFO_CONTENT_TEXT;
 		entry->private_data = chip;
-		entry->mode = S_IFREG | S_IRUGO | S_IWUSR;
+		entry->mode = S_IFREG | 0644;
 		entry->c.text.read = cs46xx_dsp_proc_scb_read;
 		if (snd_info_register(entry) < 0) {
 			snd_info_free_entry(entry);
@@ -1441,7 +1442,7 @@ int cs46xx_dsp_scb_and_task_init (struct snd_cs46xx *chip)
 	
 	if (chip->nr_ac97_codecs == 2) {
 		/* create CODEC tasklet for rear Center/LFE output 
-		   slot 6 and 9 on seconadry CODEC */
+		   slot 6 and 9 on secondary CODEC */
 		clfe_codec_out_scb = cs46xx_dsp_create_codec_out_scb(chip,"CodecOutSCB_CLFE",0x0030,0x0030,
 								     CLFE_MIXER_SCB_ADDR,
 								     CLFE_CODEC_SCB_ADDR,

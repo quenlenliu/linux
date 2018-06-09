@@ -34,11 +34,14 @@
 #include <linux/perf_event.h>
 #include <linux/context_tracking.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
+#include <linux/pkeys.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/switch_to.h>
 #include <asm/tm.h>
+#include <asm/asm-prototypes.h>
+#include <asm/debug.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/syscalls.h>
@@ -126,12 +129,19 @@ static void flush_tmregs_to_thread(struct task_struct *tsk)
 	 * If task is not current, it will have been flushed already to
 	 * it's thread_struct during __switch_to().
 	 *
-	 * A reclaim flushes ALL the state.
+	 * A reclaim flushes ALL the state or if not in TM save TM SPRs
+	 * in the appropriate thread structures from live.
 	 */
 
-	if (tsk == current && MSR_TM_SUSPENDED(mfmsr()))
-		tm_reclaim_current(TM_CAUSE_SIGNAL);
+	if ((!cpu_has_feature(CPU_FTR_TM)) || (tsk != current))
+		return;
 
+	if (MSR_TM_SUSPENDED(mfmsr())) {
+		tm_reclaim_current(TM_CAUSE_SIGNAL);
+	} else {
+		tm_enable();
+		tm_save_sprs(&(tsk->thread));
+	}
 }
 #else
 static inline void flush_tmregs_to_thread(struct task_struct *tsk) { }
@@ -275,6 +285,18 @@ int ptrace_get_reg(struct task_struct *task, int regno, unsigned long *data)
 	if (regno == PT_DSCR)
 		return get_user_dscr(task, data);
 
+#ifdef CONFIG_PPC64
+	/*
+	 * softe copies paca->irq_soft_mask variable state. Since irq_soft_mask is
+	 * no more used as a flag, lets force usr to alway see the softe value as 1
+	 * which means interrupts are not soft disabled.
+	 */
+	if (regno == PT_SOFTE) {
+		*data = 1;
+		return  0;
+	}
+#endif
+
 	if (regno < (sizeof(struct pt_regs) / sizeof(unsigned long))) {
 		*data = ((unsigned long *)task->thread.regs)[regno];
 		return 0;
@@ -402,13 +424,9 @@ static int gpr_set(struct task_struct *target, const struct user_regset *regset,
 }
 
 /*
- * When the transaction is active, 'transact_fp' holds the current running
- * value of all FPR registers and 'fp_state' holds the last checkpointed
- * value of all FPR registers for the current transaction. When transaction
- * is not active 'fp_state' holds the current running state of all the FPR
- * registers. So this function which returns the current running values of
- * all the FPR registers, needs to know whether any transaction is active
- * or not.
+ * Regardless of transactions, 'fp_state' holds the current running
+ * value of all FPR registers and 'ckfp_state' holds the last checkpointed
+ * value of all FPR registers for the current transaction.
  *
  * Userspace interface buffer layout:
  *
@@ -416,13 +434,6 @@ static int gpr_set(struct task_struct *target, const struct user_regset *regset,
  *	u64	fpr[32];
  *	u64	fpscr;
  * };
- *
- * There are two config options CONFIG_VSX and CONFIG_PPC_TRANSACTIONAL_MEM
- * which determines the final code in this function. All the combinations of
- * these two config options are possible except the one below as transactional
- * memory config pulls in CONFIG_VSX automatically.
- *
- *	!defined(CONFIG_VSX) && defined(CONFIG_PPC_TRANSACTIONAL_MEM)
  */
 static int fpr_get(struct task_struct *target, const struct user_regset *regset,
 		   unsigned int pos, unsigned int count,
@@ -431,36 +442,19 @@ static int fpr_get(struct task_struct *target, const struct user_regset *regset,
 #ifdef CONFIG_VSX
 	u64 buf[33];
 	int i;
-#endif
+
 	flush_fp_to_thread(target);
 
-#if defined(CONFIG_VSX) && defined(CONFIG_PPC_TRANSACTIONAL_MEM)
-	/* copy to local buffer then write that out */
-	if (MSR_TM_ACTIVE(target->thread.regs->msr)) {
-		flush_altivec_to_thread(target);
-		flush_tmregs_to_thread(target);
-		for (i = 0; i < 32 ; i++)
-			buf[i] = target->thread.TS_TRANS_FPR(i);
-		buf[32] = target->thread.transact_fp.fpscr;
-	} else {
-		for (i = 0; i < 32 ; i++)
-			buf[i] = target->thread.TS_FPR(i);
-		buf[32] = target->thread.fp_state.fpscr;
-	}
-	return user_regset_copyout(&pos, &count, &kbuf, &ubuf, buf, 0, -1);
-#endif
-
-#if defined(CONFIG_VSX) && !defined(CONFIG_PPC_TRANSACTIONAL_MEM)
 	/* copy to local buffer then write that out */
 	for (i = 0; i < 32 ; i++)
 		buf[i] = target->thread.TS_FPR(i);
 	buf[32] = target->thread.fp_state.fpscr;
 	return user_regset_copyout(&pos, &count, &kbuf, &ubuf, buf, 0, -1);
-#endif
-
-#if !defined(CONFIG_VSX) && !defined(CONFIG_PPC_TRANSACTIONAL_MEM)
+#else
 	BUILD_BUG_ON(offsetof(struct thread_fp_state, fpscr) !=
 		     offsetof(struct thread_fp_state, fpr[32]));
+
+	flush_fp_to_thread(target);
 
 	return user_regset_copyout(&pos, &count, &kbuf, &ubuf,
 				   &target->thread.fp_state, 0, -1);
@@ -468,13 +462,9 @@ static int fpr_get(struct task_struct *target, const struct user_regset *regset,
 }
 
 /*
- * When the transaction is active, 'transact_fp' holds the current running
- * value of all FPR registers and 'fp_state' holds the last checkpointed
- * value of all FPR registers for the current transaction. When transaction
- * is not active 'fp_state' holds the current running state of all the FPR
- * registers. So this function which setss the current running values of
- * all the FPR registers, needs to know whether any transaction is active
- * or not.
+ * Regardless of transactions, 'fp_state' holds the current running
+ * value of all FPR registers and 'ckfp_state' holds the last checkpointed
+ * value of all FPR registers for the current transaction.
  *
  * Userspace interface buffer layout:
  *
@@ -483,12 +473,6 @@ static int fpr_get(struct task_struct *target, const struct user_regset *regset,
  *	u64	fpscr;
  * };
  *
- * There are two config options CONFIG_VSX and CONFIG_PPC_TRANSACTIONAL_MEM
- * which determines the final code in this function. All the combinations of
- * these two config options are possible except the one below as transactional
- * memory config pulls in CONFIG_VSX automatically.
- *
- *	!defined(CONFIG_VSX) && defined(CONFIG_PPC_TRANSACTIONAL_MEM)
  */
 static int fpr_set(struct task_struct *target, const struct user_regset *regset,
 		   unsigned int pos, unsigned int count,
@@ -497,43 +481,27 @@ static int fpr_set(struct task_struct *target, const struct user_regset *regset,
 #ifdef CONFIG_VSX
 	u64 buf[33];
 	int i;
-#endif
+
 	flush_fp_to_thread(target);
 
-#if defined(CONFIG_VSX) && defined(CONFIG_PPC_TRANSACTIONAL_MEM)
+	for (i = 0; i < 32 ; i++)
+		buf[i] = target->thread.TS_FPR(i);
+	buf[32] = target->thread.fp_state.fpscr;
+
 	/* copy to local buffer then write that out */
 	i = user_regset_copyin(&pos, &count, &kbuf, &ubuf, buf, 0, -1);
 	if (i)
 		return i;
 
-	if (MSR_TM_ACTIVE(target->thread.regs->msr)) {
-		flush_altivec_to_thread(target);
-		flush_tmregs_to_thread(target);
-		for (i = 0; i < 32 ; i++)
-			target->thread.TS_TRANS_FPR(i) = buf[i];
-		target->thread.transact_fp.fpscr = buf[32];
-	} else {
-		for (i = 0; i < 32 ; i++)
-			target->thread.TS_FPR(i) = buf[i];
-		target->thread.fp_state.fpscr = buf[32];
-	}
-	return 0;
-#endif
-
-#if defined(CONFIG_VSX) && !defined(CONFIG_PPC_TRANSACTIONAL_MEM)
-	/* copy to local buffer then write that out */
-	i = user_regset_copyin(&pos, &count, &kbuf, &ubuf, buf, 0, -1);
-	if (i)
-		return i;
 	for (i = 0; i < 32 ; i++)
 		target->thread.TS_FPR(i) = buf[i];
 	target->thread.fp_state.fpscr = buf[32];
 	return 0;
-#endif
-
-#if !defined(CONFIG_VSX) && !defined(CONFIG_PPC_TRANSACTIONAL_MEM)
+#else
 	BUILD_BUG_ON(offsetof(struct thread_fp_state, fpscr) !=
 		     offsetof(struct thread_fp_state, fpr[32]));
+
+	flush_fp_to_thread(target);
 
 	return user_regset_copyin(&pos, &count, &kbuf, &ubuf,
 				  &target->thread.fp_state, 0, -1);
@@ -562,13 +530,10 @@ static int vr_active(struct task_struct *target,
 }
 
 /*
- * When the transaction is active, 'transact_vr' holds the current running
- * value of all the VMX registers and 'vr_state' holds the last checkpointed
- * value of all the VMX registers for the current transaction to fall back
- * on in case it aborts. When transaction is not active 'vr_state' holds
- * the current running state of all the VMX registers. So this function which
- * gets the current running values of all the VMX registers, needs to know
- * whether any transaction is active or not.
+ * Regardless of transactions, 'vr_state' holds the current running
+ * value of all the VMX registers and 'ckvr_state' holds the last
+ * checkpointed value of all the VMX registers for the current
+ * transaction to fall back on in case it aborts.
  *
  * Userspace interface buffer layout:
  *
@@ -582,7 +547,6 @@ static int vr_get(struct task_struct *target, const struct user_regset *regset,
 		  unsigned int pos, unsigned int count,
 		  void *kbuf, void __user *ubuf)
 {
-	struct thread_vr_state *addr;
 	int ret;
 
 	flush_altivec_to_thread(target);
@@ -590,19 +554,8 @@ static int vr_get(struct task_struct *target, const struct user_regset *regset,
 	BUILD_BUG_ON(offsetof(struct thread_vr_state, vscr) !=
 		     offsetof(struct thread_vr_state, vr[32]));
 
-#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
-	if (MSR_TM_ACTIVE(target->thread.regs->msr)) {
-		flush_fp_to_thread(target);
-		flush_tmregs_to_thread(target);
-		addr = &target->thread.transact_vr;
-	} else {
-		addr = &target->thread.vr_state;
-	}
-#else
-	addr = &target->thread.vr_state;
-#endif
 	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
-				  addr, 0,
+				  &target->thread.vr_state, 0,
 				  33 * sizeof(vector128));
 	if (!ret) {
 		/*
@@ -614,14 +567,7 @@ static int vr_get(struct task_struct *target, const struct user_regset *regset,
 		} vrsave;
 		memset(&vrsave, 0, sizeof(vrsave));
 
-#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
-		if (MSR_TM_ACTIVE(target->thread.regs->msr))
-			vrsave.word = target->thread.transact_vrsave;
-		else
-			vrsave.word = target->thread.vrsave;
-#else
 		vrsave.word = target->thread.vrsave;
-#endif
 
 		ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf, &vrsave,
 					  33 * sizeof(vector128), -1);
@@ -631,13 +577,10 @@ static int vr_get(struct task_struct *target, const struct user_regset *regset,
 }
 
 /*
- * When the transaction is active, 'transact_vr' holds the current running
- * value of all the VMX registers and 'vr_state' holds the last checkpointed
- * value of all the VMX registers for the current transaction to fall back
- * on in case it aborts. When transaction is not active 'vr_state' holds
- * the current running state of all the VMX registers. So this function which
- * sets the current running values of all the VMX registers, needs to know
- * whether any transaction is active or not.
+ * Regardless of transactions, 'vr_state' holds the current running
+ * value of all the VMX registers and 'ckvr_state' holds the last
+ * checkpointed value of all the VMX registers for the current
+ * transaction to fall back on in case it aborts.
  *
  * Userspace interface buffer layout:
  *
@@ -651,7 +594,6 @@ static int vr_set(struct task_struct *target, const struct user_regset *regset,
 		  unsigned int pos, unsigned int count,
 		  const void *kbuf, const void __user *ubuf)
 {
-	struct thread_vr_state *addr;
 	int ret;
 
 	flush_altivec_to_thread(target);
@@ -659,19 +601,8 @@ static int vr_set(struct task_struct *target, const struct user_regset *regset,
 	BUILD_BUG_ON(offsetof(struct thread_vr_state, vscr) !=
 		     offsetof(struct thread_vr_state, vr[32]));
 
-#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
-	if (MSR_TM_ACTIVE(target->thread.regs->msr)) {
-		flush_fp_to_thread(target);
-		flush_tmregs_to_thread(target);
-		addr = &target->thread.transact_vr;
-	} else {
-		addr = &target->thread.vr_state;
-	}
-#else
-	addr = &target->thread.vr_state;
-#endif
 	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
-				 addr, 0,
+				 &target->thread.vr_state, 0,
 				 33 * sizeof(vector128));
 	if (!ret && count > 0) {
 		/*
@@ -683,27 +614,12 @@ static int vr_set(struct task_struct *target, const struct user_regset *regset,
 		} vrsave;
 		memset(&vrsave, 0, sizeof(vrsave));
 
-#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
-		if (MSR_TM_ACTIVE(target->thread.regs->msr))
-			vrsave.word = target->thread.transact_vrsave;
-		else
-			vrsave.word = target->thread.vrsave;
-#else
 		vrsave.word = target->thread.vrsave;
-#endif
+
 		ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &vrsave,
 					 33 * sizeof(vector128), -1);
-		if (!ret) {
-
-#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
-			if (MSR_TM_ACTIVE(target->thread.regs->msr))
-				target->thread.transact_vrsave = vrsave.word;
-			else
-				target->thread.vrsave = vrsave.word;
-#else
+		if (!ret)
 			target->thread.vrsave = vrsave.word;
-#endif
-		}
 	}
 
 	return ret;
@@ -725,13 +641,10 @@ static int vsr_active(struct task_struct *target,
 }
 
 /*
- * When the transaction is active, 'transact_fp' holds the current running
- * value of all FPR registers and 'fp_state' holds the last checkpointed
- * value of all FPR registers for the current transaction. When transaction
- * is not active 'fp_state' holds the current running state of all the FPR
- * registers. So this function which returns the current running values of
- * all the FPR registers, needs to know whether any transaction is active
- * or not.
+ * Regardless of transactions, 'fp_state' holds the current running
+ * value of all FPR registers and 'ckfp_state' holds the last
+ * checkpointed value of all FPR registers for the current
+ * transaction.
  *
  * Userspace interface buffer layout:
  *
@@ -746,27 +659,14 @@ static int vsr_get(struct task_struct *target, const struct user_regset *regset,
 	u64 buf[32];
 	int ret, i;
 
-#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
+	flush_tmregs_to_thread(target);
 	flush_fp_to_thread(target);
 	flush_altivec_to_thread(target);
-	flush_tmregs_to_thread(target);
-#endif
 	flush_vsx_to_thread(target);
 
-#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
-	if (MSR_TM_ACTIVE(target->thread.regs->msr)) {
-		for (i = 0; i < 32 ; i++)
-			buf[i] = target->thread.
-				transact_fp.fpr[i][TS_VSRLOWOFFSET];
-	} else {
-		for (i = 0; i < 32 ; i++)
-			buf[i] = target->thread.
-				fp_state.fpr[i][TS_VSRLOWOFFSET];
-	}
-#else
 	for (i = 0; i < 32 ; i++)
 		buf[i] = target->thread.fp_state.fpr[i][TS_VSRLOWOFFSET];
-#endif
+
 	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
 				  buf, 0, 32 * sizeof(double));
 
@@ -774,12 +674,10 @@ static int vsr_get(struct task_struct *target, const struct user_regset *regset,
 }
 
 /*
- * When the transaction is active, 'transact_fp' holds the current running
- * value of all FPR registers and 'fp_state' holds the last checkpointed
- * value of all FPR registers for the current transaction. When transaction
- * is not active 'fp_state' holds the current running state of all the FPR
- * registers. So this function which sets the current running values of all
- * the FPR registers, needs to know whether any transaction is active or not.
+ * Regardless of transactions, 'fp_state' holds the current running
+ * value of all FPR registers and 'ckfp_state' holds the last
+ * checkpointed value of all FPR registers for the current
+ * transaction.
  *
  * Userspace interface buffer layout:
  *
@@ -794,31 +692,19 @@ static int vsr_set(struct task_struct *target, const struct user_regset *regset,
 	u64 buf[32];
 	int ret,i;
 
-#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
+	flush_tmregs_to_thread(target);
 	flush_fp_to_thread(target);
 	flush_altivec_to_thread(target);
-	flush_tmregs_to_thread(target);
-#endif
 	flush_vsx_to_thread(target);
+
+	for (i = 0; i < 32 ; i++)
+		buf[i] = target->thread.fp_state.fpr[i][TS_VSRLOWOFFSET];
 
 	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
 				 buf, 0, 32 * sizeof(double));
-
-#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
-	if (MSR_TM_ACTIVE(target->thread.regs->msr)) {
+	if (!ret)
 		for (i = 0; i < 32 ; i++)
-			target->thread.transact_fp.
-				fpr[i][TS_VSRLOWOFFSET] = buf[i];
-	} else {
-		for (i = 0; i < 32 ; i++)
-			target->thread.fp_state.
-				fpr[i][TS_VSRLOWOFFSET] = buf[i];
-	}
-#else
-	for (i = 0; i < 32 ; i++)
-		target->thread.fp_state.fpr[i][TS_VSRLOWOFFSET] = buf[i];
-#endif
-
+			target->thread.fp_state.fpr[i][TS_VSRLOWOFFSET] = buf[i];
 
 	return ret;
 }
@@ -944,9 +830,9 @@ static int tm_cgpr_get(struct task_struct *target,
 	if (!MSR_TM_ACTIVE(target->thread.regs->msr))
 		return -ENODATA;
 
+	flush_tmregs_to_thread(target);
 	flush_fp_to_thread(target);
 	flush_altivec_to_thread(target);
-	flush_tmregs_to_thread(target);
 
 	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
 				  &target->thread.ckpt_regs,
@@ -1009,9 +895,9 @@ static int tm_cgpr_set(struct task_struct *target,
 	if (!MSR_TM_ACTIVE(target->thread.regs->msr))
 		return -ENODATA;
 
+	flush_tmregs_to_thread(target);
 	flush_fp_to_thread(target);
 	flush_altivec_to_thread(target);
-	flush_tmregs_to_thread(target);
 
 	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
 				 &target->thread.ckpt_regs,
@@ -1087,7 +973,7 @@ static int tm_cfpr_active(struct task_struct *target,
  *
  * This function gets in transaction checkpointed FPR registers.
  *
- * When the transaction is active 'fp_state' holds the checkpointed
+ * When the transaction is active 'ckfp_state' holds the checkpointed
  * values for the current transaction to fall back on if it aborts
  * in between. This function gets those checkpointed FPR registers.
  * The userspace interface buffer layout is as follows.
@@ -1111,14 +997,14 @@ static int tm_cfpr_get(struct task_struct *target,
 	if (!MSR_TM_ACTIVE(target->thread.regs->msr))
 		return -ENODATA;
 
+	flush_tmregs_to_thread(target);
 	flush_fp_to_thread(target);
 	flush_altivec_to_thread(target);
-	flush_tmregs_to_thread(target);
 
 	/* copy to local buffer then write that out */
 	for (i = 0; i < 32 ; i++)
-		buf[i] = target->thread.TS_FPR(i);
-	buf[32] = target->thread.fp_state.fpscr;
+		buf[i] = target->thread.TS_CKFPR(i);
+	buf[32] = target->thread.ckfp_state.fpscr;
 	return user_regset_copyout(&pos, &count, &kbuf, &ubuf, buf, 0, -1);
 }
 
@@ -1133,7 +1019,7 @@ static int tm_cfpr_get(struct task_struct *target,
  *
  * This function sets in transaction checkpointed FPR registers.
  *
- * When the transaction is active 'fp_state' holds the checkpointed
+ * When the transaction is active 'ckfp_state' holds the checkpointed
  * FPR register values for the current transaction to fall back on
  * if it aborts in between. This function sets these checkpointed
  * FPR registers. The userspace interface buffer layout is as follows.
@@ -1157,17 +1043,21 @@ static int tm_cfpr_set(struct task_struct *target,
 	if (!MSR_TM_ACTIVE(target->thread.regs->msr))
 		return -ENODATA;
 
+	flush_tmregs_to_thread(target);
 	flush_fp_to_thread(target);
 	flush_altivec_to_thread(target);
-	flush_tmregs_to_thread(target);
+
+	for (i = 0; i < 32; i++)
+		buf[i] = target->thread.TS_CKFPR(i);
+	buf[32] = target->thread.ckfp_state.fpscr;
 
 	/* copy to local buffer then write that out */
 	i = user_regset_copyin(&pos, &count, &kbuf, &ubuf, buf, 0, -1);
 	if (i)
 		return i;
 	for (i = 0; i < 32 ; i++)
-		target->thread.TS_FPR(i) = buf[i];
-	target->thread.fp_state.fpscr = buf[32];
+		target->thread.TS_CKFPR(i) = buf[i];
+	target->thread.ckfp_state.fpscr = buf[32];
 	return 0;
 }
 
@@ -1202,7 +1092,7 @@ static int tm_cvmx_active(struct task_struct *target,
  *
  * This function gets in transaction checkpointed VMX registers.
  *
- * When the transaction is active 'vr_state' and 'vr_save' hold
+ * When the transaction is active 'ckvr_state' and 'ckvrsave' hold
  * the checkpointed values for the current transaction to fall
  * back on if it aborts in between. The userspace interface buffer
  * layout is as follows.
@@ -1229,12 +1119,12 @@ static int tm_cvmx_get(struct task_struct *target,
 		return -ENODATA;
 
 	/* Flush the state */
+	flush_tmregs_to_thread(target);
 	flush_fp_to_thread(target);
 	flush_altivec_to_thread(target);
-	flush_tmregs_to_thread(target);
 
 	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
-					&target->thread.vr_state, 0,
+					&target->thread.ckvr_state, 0,
 					33 * sizeof(vector128));
 	if (!ret) {
 		/*
@@ -1245,7 +1135,7 @@ static int tm_cvmx_get(struct task_struct *target,
 			u32 word;
 		} vrsave;
 		memset(&vrsave, 0, sizeof(vrsave));
-		vrsave.word = target->thread.vrsave;
+		vrsave.word = target->thread.ckvrsave;
 		ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf, &vrsave,
 						33 * sizeof(vector128), -1);
 	}
@@ -1264,7 +1154,7 @@ static int tm_cvmx_get(struct task_struct *target,
  *
  * This function sets in transaction checkpointed VMX registers.
  *
- * When the transaction is active 'vr_state' and 'vr_save' hold
+ * When the transaction is active 'ckvr_state' and 'ckvrsave' hold
  * the checkpointed values for the current transaction to fall
  * back on if it aborts in between. The userspace interface buffer
  * layout is as follows.
@@ -1290,12 +1180,12 @@ static int tm_cvmx_set(struct task_struct *target,
 	if (!MSR_TM_ACTIVE(target->thread.regs->msr))
 		return -ENODATA;
 
+	flush_tmregs_to_thread(target);
 	flush_fp_to_thread(target);
 	flush_altivec_to_thread(target);
-	flush_tmregs_to_thread(target);
 
 	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
-					&target->thread.vr_state, 0,
+					&target->thread.ckvr_state, 0,
 					33 * sizeof(vector128));
 	if (!ret && count > 0) {
 		/*
@@ -1306,11 +1196,11 @@ static int tm_cvmx_set(struct task_struct *target,
 			u32 word;
 		} vrsave;
 		memset(&vrsave, 0, sizeof(vrsave));
-		vrsave.word = target->thread.vrsave;
+		vrsave.word = target->thread.ckvrsave;
 		ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &vrsave,
 						33 * sizeof(vector128), -1);
 		if (!ret)
-			target->thread.vrsave = vrsave.word;
+			target->thread.ckvrsave = vrsave.word;
 	}
 
 	return ret;
@@ -1348,7 +1238,7 @@ static int tm_cvsx_active(struct task_struct *target,
  *
  * This function gets in transaction checkpointed VSX registers.
  *
- * When the transaction is active 'fp_state' holds the checkpointed
+ * When the transaction is active 'ckfp_state' holds the checkpointed
  * values for the current transaction to fall back on if it aborts
  * in between. This function gets those checkpointed VSX registers.
  * The userspace interface buffer layout is as follows.
@@ -1372,13 +1262,13 @@ static int tm_cvsx_get(struct task_struct *target,
 		return -ENODATA;
 
 	/* Flush the state */
+	flush_tmregs_to_thread(target);
 	flush_fp_to_thread(target);
 	flush_altivec_to_thread(target);
-	flush_tmregs_to_thread(target);
 	flush_vsx_to_thread(target);
 
 	for (i = 0; i < 32 ; i++)
-		buf[i] = target->thread.fp_state.fpr[i][TS_VSRLOWOFFSET];
+		buf[i] = target->thread.ckfp_state.fpr[i][TS_VSRLOWOFFSET];
 	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
 				  buf, 0, 32 * sizeof(double));
 
@@ -1396,7 +1286,7 @@ static int tm_cvsx_get(struct task_struct *target,
  *
  * This function sets in transaction checkpointed VSX registers.
  *
- * When the transaction is active 'fp_state' holds the checkpointed
+ * When the transaction is active 'ckfp_state' holds the checkpointed
  * VSX register values for the current transaction to fall back on
  * if it aborts in between. This function sets these checkpointed
  * FPR registers. The userspace interface buffer layout is as follows.
@@ -1420,15 +1310,19 @@ static int tm_cvsx_set(struct task_struct *target,
 		return -ENODATA;
 
 	/* Flush the state */
+	flush_tmregs_to_thread(target);
 	flush_fp_to_thread(target);
 	flush_altivec_to_thread(target);
-	flush_tmregs_to_thread(target);
 	flush_vsx_to_thread(target);
+
+	for (i = 0; i < 32 ; i++)
+		buf[i] = target->thread.ckfp_state.fpr[i][TS_VSRLOWOFFSET];
 
 	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
 				 buf, 0, 32 * sizeof(double));
-	for (i = 0; i < 32 ; i++)
-		target->thread.fp_state.fpr[i][TS_VSRLOWOFFSET] = buf[i];
+	if (!ret)
+		for (i = 0; i < 32 ; i++)
+			target->thread.ckfp_state.fpr[i][TS_VSRLOWOFFSET] = buf[i];
 
 	return ret;
 }
@@ -1484,9 +1378,9 @@ static int tm_spr_get(struct task_struct *target,
 		return -ENODEV;
 
 	/* Flush the states */
+	flush_tmregs_to_thread(target);
 	flush_fp_to_thread(target);
 	flush_altivec_to_thread(target);
-	flush_tmregs_to_thread(target);
 
 	/* TFHAR register */
 	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
@@ -1540,9 +1434,9 @@ static int tm_spr_set(struct task_struct *target,
 		return -ENODEV;
 
 	/* Flush the states */
+	flush_tmregs_to_thread(target);
 	flush_fp_to_thread(target);
 	flush_altivec_to_thread(target);
-	flush_tmregs_to_thread(target);
 
 	/* TFHAR register */
 	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
@@ -1714,11 +1608,8 @@ static int ppr_get(struct task_struct *target,
 		      unsigned int pos, unsigned int count,
 		      void *kbuf, void __user *ubuf)
 {
-	int ret;
-
-	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
-				&target->thread.ppr, 0, sizeof(u64));
-	return ret;
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				   &target->thread.ppr, 0, sizeof(u64));
 }
 
 static int ppr_set(struct task_struct *target,
@@ -1726,11 +1617,8 @@ static int ppr_set(struct task_struct *target,
 		      unsigned int pos, unsigned int count,
 		      const void *kbuf, const void __user *ubuf)
 {
-	int ret;
-
-	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
-				&target->thread.ppr, 0, sizeof(u64));
-	return ret;
+	return user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				  &target->thread.ppr, 0, sizeof(u64));
 }
 
 static int dscr_get(struct task_struct *target,
@@ -1738,22 +1626,16 @@ static int dscr_get(struct task_struct *target,
 		      unsigned int pos, unsigned int count,
 		      void *kbuf, void __user *ubuf)
 {
-	int ret;
-
-	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
-				&target->thread.dscr, 0, sizeof(u64));
-	return ret;
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				   &target->thread.dscr, 0, sizeof(u64));
 }
 static int dscr_set(struct task_struct *target,
 		      const struct user_regset *regset,
 		      unsigned int pos, unsigned int count,
 		      const void *kbuf, const void __user *ubuf)
 {
-	int ret;
-
-	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
-				&target->thread.dscr, 0, sizeof(u64));
-	return ret;
+	return user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				  &target->thread.dscr, 0, sizeof(u64));
 }
 #endif
 #ifdef CONFIG_PPC_BOOK3S_64
@@ -1762,22 +1644,16 @@ static int tar_get(struct task_struct *target,
 		      unsigned int pos, unsigned int count,
 		      void *kbuf, void __user *ubuf)
 {
-	int ret;
-
-	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
-				&target->thread.tar, 0, sizeof(u64));
-	return ret;
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				   &target->thread.tar, 0, sizeof(u64));
 }
 static int tar_set(struct task_struct *target,
 		      const struct user_regset *regset,
 		      unsigned int pos, unsigned int count,
 		      const void *kbuf, const void __user *ubuf)
 {
-	int ret;
-
-	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
-				&target->thread.tar, 0, sizeof(u64));
-	return ret;
+	return user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				  &target->thread.tar, 0, sizeof(u64));
 }
 
 static int ebb_active(struct task_struct *target,
@@ -1913,6 +1789,61 @@ static int pmu_set(struct task_struct *target,
 	return ret;
 }
 #endif
+
+#ifdef CONFIG_PPC_MEM_KEYS
+static int pkey_active(struct task_struct *target,
+		       const struct user_regset *regset)
+{
+	if (!arch_pkeys_enabled())
+		return -ENODEV;
+
+	return regset->n;
+}
+
+static int pkey_get(struct task_struct *target,
+		    const struct user_regset *regset,
+		    unsigned int pos, unsigned int count,
+		    void *kbuf, void __user *ubuf)
+{
+	BUILD_BUG_ON(TSO(amr) + sizeof(unsigned long) != TSO(iamr));
+	BUILD_BUG_ON(TSO(iamr) + sizeof(unsigned long) != TSO(uamor));
+
+	if (!arch_pkeys_enabled())
+		return -ENODEV;
+
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				   &target->thread.amr, 0,
+				   ELF_NPKEY * sizeof(unsigned long));
+}
+
+static int pkey_set(struct task_struct *target,
+		      const struct user_regset *regset,
+		      unsigned int pos, unsigned int count,
+		      const void *kbuf, const void __user *ubuf)
+{
+	u64 new_amr;
+	int ret;
+
+	if (!arch_pkeys_enabled())
+		return -ENODEV;
+
+	/* Only the AMR can be set from userspace */
+	if (pos != 0 || count != sizeof(new_amr))
+		return -EINVAL;
+
+	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				 &new_amr, 0, sizeof(new_amr));
+	if (ret)
+		return ret;
+
+	/* UAMOR determines which bits of the AMR can be set from userspace. */
+	target->thread.amr = (new_amr & target->thread.uamor) |
+		(target->thread.amr & ~target->thread.uamor);
+
+	return 0;
+}
+#endif /* CONFIG_PPC_MEM_KEYS */
+
 /*
  * These are our native regset flavors.
  */
@@ -1946,6 +1877,9 @@ enum powerpc_regset {
 	REGSET_TAR,		/* TAR register */
 	REGSET_EBB,		/* EBB registers */
 	REGSET_PMR,		/* Performance Monitor Registers */
+#endif
+#ifdef CONFIG_PPC_MEM_KEYS
+	REGSET_PKEY,		/* AMR register */
 #endif
 };
 
@@ -2052,6 +1986,13 @@ static const struct user_regset native_regsets[] = {
 		.active = pmu_active, .get = pmu_get, .set = pmu_set
 	},
 #endif
+#ifdef CONFIG_PPC_MEM_KEYS
+	[REGSET_PKEY] = {
+		.core_note_type = NT_PPC_PKEY, .n = ELF_NPKEY,
+		.size = sizeof(u64), .align = sizeof(u64),
+		.active = pkey_active, .get = pkey_get, .set = pkey_set
+	},
+#endif
 };
 
 static const struct user_regset_view user_ppc_native_view = {
@@ -2065,33 +2006,12 @@ static const struct user_regset_view user_ppc_native_view = {
 static int gpr32_get_common(struct task_struct *target,
 		     const struct user_regset *regset,
 		     unsigned int pos, unsigned int count,
-			    void *kbuf, void __user *ubuf, bool tm_active)
+			    void *kbuf, void __user *ubuf,
+			    unsigned long *regs)
 {
-	const unsigned long *regs = &target->thread.regs->gpr[0];
-	const unsigned long *ckpt_regs;
 	compat_ulong_t *k = kbuf;
 	compat_ulong_t __user *u = ubuf;
 	compat_ulong_t reg;
-	int i;
-
-#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
-	ckpt_regs = &target->thread.ckpt_regs.gpr[0];
-#endif
-	if (tm_active) {
-		regs = ckpt_regs;
-	} else {
-		if (target->thread.regs == NULL)
-			return -EIO;
-
-		if (!FULL_REGS(target->thread.regs)) {
-			/*
-			 * We have a partial register set.
-			 * Fill 14-31 with bogus values.
-			 */
-			for (i = 14; i < 32; i++)
-				target->thread.regs->gpr[i] = NV_REG_POISON;
-		}
-	}
 
 	pos /= sizeof(reg);
 	count /= sizeof(reg);
@@ -2133,28 +2053,12 @@ static int gpr32_get_common(struct task_struct *target,
 static int gpr32_set_common(struct task_struct *target,
 		     const struct user_regset *regset,
 		     unsigned int pos, unsigned int count,
-		     const void *kbuf, const void __user *ubuf, bool tm_active)
+		     const void *kbuf, const void __user *ubuf,
+		     unsigned long *regs)
 {
-	unsigned long *regs = &target->thread.regs->gpr[0];
-	unsigned long *ckpt_regs;
 	const compat_ulong_t *k = kbuf;
 	const compat_ulong_t __user *u = ubuf;
 	compat_ulong_t reg;
-
-#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
-	ckpt_regs = &target->thread.ckpt_regs.gpr[0];
-#endif
-
-	if (tm_active) {
-		regs = ckpt_regs;
-	} else {
-		regs = &target->thread.regs->gpr[0];
-
-		if (target->thread.regs == NULL)
-			return -EIO;
-
-		CHECK_FULL_REGS(target->thread.regs);
-	}
 
 	pos /= sizeof(reg);
 	count /= sizeof(reg);
@@ -2220,7 +2124,8 @@ static int tm_cgpr32_get(struct task_struct *target,
 		     unsigned int pos, unsigned int count,
 		     void *kbuf, void __user *ubuf)
 {
-	return gpr32_get_common(target, regset, pos, count, kbuf, ubuf, 1);
+	return gpr32_get_common(target, regset, pos, count, kbuf, ubuf,
+			&target->thread.ckpt_regs.gpr[0]);
 }
 
 static int tm_cgpr32_set(struct task_struct *target,
@@ -2228,7 +2133,8 @@ static int tm_cgpr32_set(struct task_struct *target,
 		     unsigned int pos, unsigned int count,
 		     const void *kbuf, const void __user *ubuf)
 {
-	return gpr32_set_common(target, regset, pos, count, kbuf, ubuf, 1);
+	return gpr32_set_common(target, regset, pos, count, kbuf, ubuf,
+			&target->thread.ckpt_regs.gpr[0]);
 }
 #endif /* CONFIG_PPC_TRANSACTIONAL_MEM */
 
@@ -2237,7 +2143,21 @@ static int gpr32_get(struct task_struct *target,
 		     unsigned int pos, unsigned int count,
 		     void *kbuf, void __user *ubuf)
 {
-	return gpr32_get_common(target, regset, pos, count, kbuf, ubuf, 0);
+	int i;
+
+	if (target->thread.regs == NULL)
+		return -EIO;
+
+	if (!FULL_REGS(target->thread.regs)) {
+		/*
+		 * We have a partial register set.
+		 * Fill 14-31 with bogus values.
+		 */
+		for (i = 14; i < 32; i++)
+			target->thread.regs->gpr[i] = NV_REG_POISON;
+	}
+	return gpr32_get_common(target, regset, pos, count, kbuf, ubuf,
+			&target->thread.regs->gpr[0]);
 }
 
 static int gpr32_set(struct task_struct *target,
@@ -2245,7 +2165,12 @@ static int gpr32_set(struct task_struct *target,
 		     unsigned int pos, unsigned int count,
 		     const void *kbuf, const void __user *ubuf)
 {
-	return gpr32_set_common(target, regset, pos, count, kbuf, ubuf, 0);
+	if (target->thread.regs == NULL)
+		return -EIO;
+
+	CHECK_FULL_REGS(target->thread.regs);
+	return gpr32_set_common(target, regset, pos, count, kbuf, ubuf,
+			&target->thread.regs->gpr[0]);
 }
 
 /*
@@ -2454,6 +2379,7 @@ static int ptrace_set_debugreg(struct task_struct *task, unsigned long addr,
 	struct perf_event_attr attr;
 #endif /* CONFIG_HAVE_HW_BREAKPOINT */
 #ifndef CONFIG_PPC_ADV_DEBUG_REGS
+	bool set_bp = true;
 	struct arch_hw_breakpoint hw_brk;
 #endif
 
@@ -2487,9 +2413,10 @@ static int ptrace_set_debugreg(struct task_struct *task, unsigned long addr,
 	hw_brk.address = data & (~HW_BRK_TYPE_DABR);
 	hw_brk.type = (data & HW_BRK_TYPE_DABR) | HW_BRK_TYPE_PRIV_ALL;
 	hw_brk.len = 8;
+	set_bp = (data) && (hw_brk.type & HW_BRK_TYPE_RDWR);
 #ifdef CONFIG_HAVE_HW_BREAKPOINT
 	bp = thread->ptrace_bps[0];
-	if ((!data) || !(hw_brk.type & HW_BRK_TYPE_RDWR)) {
+	if (!set_bp) {
 		if (bp) {
 			unregister_hw_breakpoint(bp);
 			thread->ptrace_bps[0] = NULL;
@@ -2516,6 +2443,7 @@ static int ptrace_set_debugreg(struct task_struct *task, unsigned long addr,
 	/* Create a new breakpoint request if one doesn't exist already */
 	hw_breakpoint_init(&attr);
 	attr.bp_addr = hw_brk.address;
+	attr.bp_len = 8;
 	arch_bp_generic_fields(hw_brk.type,
 			       &attr.bp_type);
 
@@ -2526,6 +2454,9 @@ static int ptrace_set_debugreg(struct task_struct *task, unsigned long addr,
 		return PTR_ERR(bp);
 	}
 
+#else /* !CONFIG_HAVE_HW_BREAKPOINT */
+	if (set_bp && (!ppc_breakpoint_available()))
+		return -ENODEV;
 #endif /* CONFIG_HAVE_HW_BREAKPOINT */
 	task->thread.hw_brk = hw_brk;
 #else /* CONFIG_PPC_ADV_DEBUG_REGS */
@@ -2980,6 +2911,9 @@ static long ppc_set_hwdebug(struct task_struct *child,
 	if (child->thread.hw_brk.address)
 		return -ENOSPC;
 
+	if (!ppc_breakpoint_available())
+		return -ENODEV;
+
 	child->thread.hw_brk = brk;
 
 	return 1;
@@ -3128,7 +3062,10 @@ long arch_ptrace(struct task_struct *child, long request,
 #endif
 #else /* !CONFIG_PPC_ADV_DEBUG_REGS */
 		dbginfo.num_instruction_bps = 0;
-		dbginfo.num_data_bps = 1;
+		if (ppc_breakpoint_available())
+			dbginfo.num_data_bps = 1;
+		else
+			dbginfo.num_data_bps = 0;
 		dbginfo.num_condition_regs = 0;
 #ifdef CONFIG_PPC64
 		dbginfo.data_bp_alignment = 8;
@@ -3145,27 +3082,19 @@ long arch_ptrace(struct task_struct *child, long request,
 #endif /* CONFIG_HAVE_HW_BREAKPOINT */
 #endif /* CONFIG_PPC_ADV_DEBUG_REGS */
 
-		if (!access_ok(VERIFY_WRITE, datavp,
-			       sizeof(struct ppc_debug_info)))
+		if (copy_to_user(datavp, &dbginfo,
+				 sizeof(struct ppc_debug_info)))
 			return -EFAULT;
-		ret = __copy_to_user(datavp, &dbginfo,
-				     sizeof(struct ppc_debug_info)) ?
-		      -EFAULT : 0;
-		break;
+		return 0;
 	}
 
 	case PPC_PTRACE_SETHWDEBUG: {
 		struct ppc_hw_breakpoint bp_info;
 
-		if (!access_ok(VERIFY_READ, datavp,
-			       sizeof(struct ppc_hw_breakpoint)))
+		if (copy_from_user(&bp_info, datavp,
+				   sizeof(struct ppc_hw_breakpoint)))
 			return -EFAULT;
-		ret = __copy_from_user(&bp_info, datavp,
-				       sizeof(struct ppc_hw_breakpoint)) ?
-		      -EFAULT : 0;
-		if (!ret)
-			ret = ppc_set_hwdebug(child, &bp_info);
-		break;
+		return ppc_set_hwdebug(child, &bp_info);
 	}
 
 	case PPC_PTRACE_DELHWDEBUG: {

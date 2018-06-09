@@ -124,24 +124,14 @@ struct xlog_ticket;
 struct xfs_log_item;
 struct xfs_item_ops;
 struct xfs_trans;
-struct xfs_log_callback;
 
 xfs_lsn_t xfs_log_done(struct xfs_mount *mp,
 		       struct xlog_ticket *ticket,
 		       struct xlog_in_core **iclog,
 		       bool regrant);
-int	  _xfs_log_force(struct xfs_mount *mp,
-			 uint		flags,
-			 int		*log_forced);
-void	  xfs_log_force(struct xfs_mount	*mp,
-			uint			flags);
-int	  _xfs_log_force_lsn(struct xfs_mount *mp,
-			     xfs_lsn_t		lsn,
-			     uint		flags,
-			     int		*log_forced);
-void	  xfs_log_force_lsn(struct xfs_mount	*mp,
-			    xfs_lsn_t		lsn,
-			    uint		flags);
+int	  xfs_log_force(struct xfs_mount *mp, uint flags);
+int	  xfs_log_force_lsn(struct xfs_mount *mp, xfs_lsn_t lsn, uint flags,
+		int *log_forced);
 int	  xfs_log_mount(struct xfs_mount	*mp,
 			struct xfs_buftarg	*log_target,
 			xfs_daddr_t		start_block,
@@ -151,8 +141,7 @@ int	xfs_log_mount_cancel(struct xfs_mount *);
 xfs_lsn_t xlog_assign_tail_lsn(struct xfs_mount *mp);
 xfs_lsn_t xlog_assign_tail_lsn_locked(struct xfs_mount *mp);
 void	  xfs_log_space_wake(struct xfs_mount *mp);
-int	  xfs_log_notify(struct xfs_mount	*mp,
-			 struct xlog_in_core	*iclog,
+int	  xfs_log_notify(struct xlog_in_core	*iclog,
 			 struct xfs_log_callback *callback_entry);
 int	  xfs_log_release_iclog(struct xfs_mount *mp,
 			 struct xlog_in_core	 *iclog);
@@ -160,7 +149,7 @@ int	  xfs_log_reserve(struct xfs_mount *mp,
 			  int		   length,
 			  int		   count,
 			  struct xlog_ticket **ticket,
-			  __uint8_t	   clientid,
+			  uint8_t		   clientid,
 			  bool		   permanent);
 int	  xfs_log_regrant(struct xfs_mount *mp, struct xlog_ticket *tic);
 void      xfs_log_unmount(struct xfs_mount *mp);

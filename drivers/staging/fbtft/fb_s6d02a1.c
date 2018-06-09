@@ -1,18 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * FB driver for the S6D02A1 LCD Controller
  *
  * Based on fb_st7735r.c by Noralf Tronnes
  * Init code from UTFT library by Henning Karlsen
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -24,7 +15,7 @@
 
 #define DRVNAME "fb_s6d02a1"
 
-static int default_init_sequence[] = {
+static const s16 default_init_sequence[] = {
 
 	-1, 0xf0, 0x5a, 0x5a,
 
@@ -113,12 +104,14 @@ static void set_addr_win(struct fbtft_par *par, int xs, int ys, int xe, int ye)
 #define MV BIT(5)
 static int set_var(struct fbtft_par *par)
 {
-	/* Memory data access control (0x36h)
-	     RGB/BGR:
-		1. Mode selection pin SRGB
-			RGB H/W pin for color filter setting: 0=RGB, 1=BGR
-		2. MADCTL RGB bit
-			RGB-BGR ORDER color filter panel: 0=RGB, 1=BGR */
+	/*
+	 * Memory data access control (0x36h)
+	 * RGB/BGR:
+	 *	1. Mode selection pin SRGB
+	 *		RGB H/W pin for color filter setting: 0=RGB, 1=BGR
+	 *	2. MADCTL RGB bit
+	 *		RGB-BGR ORDER color filter panel: 0=RGB, 1=BGR
+	 */
 	switch (par->info->var.rotate) {
 	case 0:
 		write_reg(par, MIPI_DCS_SET_ADDRESS_MODE,

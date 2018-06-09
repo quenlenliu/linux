@@ -11,11 +11,13 @@ Name
 
 AUDIO_SET_MUTE
 
+.. attention:: This ioctl is deprecated
 
 Synopsis
 --------
 
-.. cpp:function:: int  ioctl(int fd, int request = AUDIO_SET_MUTE, boolean state)
+.. c:function:: int  ioctl(int fd, AUDIO_SET_MUTE, boolean state)
+    :name: AUDIO_SET_MUTE
 
 
 Arguments
@@ -26,39 +28,27 @@ Arguments
     :stub-columns: 0
 
 
-    -  .. row 1
+    -
 
        -  int fd
 
        -  File descriptor returned by a previous call to open().
 
-    -  .. row 2
-
-       -  int request
-
-       -  Equals AUDIO_SET_MUTE for this command.
-
-    -  .. row 3
+    -
 
        -  boolean state
 
        -  Indicates if audio device shall mute or not.
 
-    -  .. row 4
+          TRUE: Audio Mute
 
-       -
-       -  TRUE Audio Mute
-
-    -  .. row 5
-
-       -
-       -  FALSE Audio Un-mute
+          FALSE: Audio Un-mute
 
 
 Description
 -----------
 
-This ioctl is for DVB devices only. To control a V4L2 decoder use the
+This ioctl is for Digital TV devices only. To control a V4L2 decoder use the
 V4L2 :ref:`VIDIOC_DECODER_CMD` with the
 ``V4L2_DEC_CMD_START_MUTE_AUDIO`` flag instead.
 

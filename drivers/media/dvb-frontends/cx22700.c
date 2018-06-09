@@ -25,7 +25,7 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/slab.h>
-#include "dvb_frontend.h"
+#include <media/dvb_frontend.h>
 #include "cx22700.h"
 
 
@@ -380,7 +380,7 @@ static void cx22700_release(struct dvb_frontend* fe)
 	kfree(state);
 }
 
-static struct dvb_frontend_ops cx22700_ops;
+static const struct dvb_frontend_ops cx22700_ops;
 
 struct dvb_frontend* cx22700_attach(const struct cx22700_config* config,
 				    struct i2c_adapter* i2c)
@@ -408,7 +408,7 @@ error:
 	return NULL;
 }
 
-static struct dvb_frontend_ops cx22700_ops = {
+static const struct dvb_frontend_ops cx22700_ops = {
 	.delsys = { SYS_DVBT },
 	.info = {
 		.name			= "Conexant CX22700 DVB-T",

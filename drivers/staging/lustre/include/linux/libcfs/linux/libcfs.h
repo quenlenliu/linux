@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -124,10 +125,6 @@ do {								    \
 #define CFS_CURPROC_COMM_MAX (sizeof((struct task_struct *)0)->comm)
 
 #include <linux/capability.h>
-
-/* long integer with size equal to pointer */
-typedef unsigned long ulong_ptr_t;
-typedef long long_ptr_t;
 
 #ifndef WITH_WATCHDOG
 #define WITH_WATCHDOG

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -29,7 +30,7 @@
  * Lustre is a trademark of Oracle Corporation, Inc.
  */
 
-#include "../../include/linux/libcfs/libcfs.h"
+#include <linux/libcfs/libcfs.h>
 
 unsigned long cfs_fail_loc;
 EXPORT_SYMBOL(cfs_fail_loc);
@@ -46,7 +47,7 @@ EXPORT_SYMBOL(cfs_race_waitq);
 int cfs_race_state;
 EXPORT_SYMBOL(cfs_race_state);
 
-int __cfs_fail_check_set(__u32 id, __u32 value, int set)
+int __cfs_fail_check_set(u32 id, u32 value, int set)
 {
 	static atomic_t cfs_fail_count = ATOMIC_INIT(0);
 
@@ -60,7 +61,7 @@ int __cfs_fail_check_set(__u32 id, __u32 value, int set)
 
 	/* Fail 1/cfs_fail_val times */
 	if (cfs_fail_loc & CFS_FAIL_RAND) {
-		if (cfs_fail_val < 2 || cfs_rand() % cfs_fail_val > 0)
+		if (cfs_fail_val < 2 || prandom_u32_max(cfs_fail_val) > 0)
 			return 0;
 	}
 
@@ -90,8 +91,10 @@ int __cfs_fail_check_set(__u32 id, __u32 value, int set)
 		}
 	}
 
-	if ((set == CFS_FAIL_LOC_ORSET || set == CFS_FAIL_LOC_RESET) &&
-	    (value & CFS_FAIL_ONCE))
+	/* Take into account the current call for FAIL_ONCE for ORSET only,
+	 * as RESET is a new fail_loc, it does not change the current call
+	 */
+	if ((set == CFS_FAIL_LOC_ORSET) && (value & CFS_FAIL_ONCE))
 		set_bit(CFS_FAIL_ONCE_BIT, &cfs_fail_loc);
 	/* Lost race to set CFS_FAILED_BIT. */
 	if (test_and_set_bit(CFS_FAILED_BIT, &cfs_fail_loc)) {
@@ -111,6 +114,7 @@ int __cfs_fail_check_set(__u32 id, __u32 value, int set)
 		break;
 	case CFS_FAIL_LOC_RESET:
 		cfs_fail_loc = value;
+		atomic_set(&cfs_fail_count, 0);
 		break;
 	default:
 		LASSERTF(0, "called with bad set %u\n", set);
@@ -121,7 +125,7 @@ int __cfs_fail_check_set(__u32 id, __u32 value, int set)
 }
 EXPORT_SYMBOL(__cfs_fail_check_set);
 
-int __cfs_fail_timeout_set(__u32 id, __u32 value, int ms, int set)
+int __cfs_fail_timeout_set(u32 id, u32 value, int ms, int set)
 {
 	int ret;
 
@@ -130,7 +134,7 @@ int __cfs_fail_timeout_set(__u32 id, __u32 value, int ms, int set)
 		CERROR("cfs_fail_timeout id %x sleeping for %dms\n",
 		       id, ms);
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout(cfs_time_seconds(ms) / 1000);
+		schedule_timeout(ms * HZ / 1000);
 		CERROR("cfs_fail_timeout id %x awake\n", id);
 	}
 	return ret;

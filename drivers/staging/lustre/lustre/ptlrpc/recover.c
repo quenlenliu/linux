@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -35,15 +36,15 @@
  */
 
 #define DEBUG_SUBSYSTEM S_RPC
-#include "../../include/linux/libcfs/libcfs.h"
+#include <linux/libcfs/libcfs.h>
 
-#include "../include/obd_support.h"
-#include "../include/lustre_ha.h"
-#include "../include/lustre_net.h"
-#include "../include/lustre_import.h"
-#include "../include/lustre_export.h"
-#include "../include/obd.h"
-#include "../include/obd_class.h"
+#include <obd_support.h>
+#include <lustre_ha.h>
+#include <lustre_net.h>
+#include <lustre_import.h>
+#include <lustre_export.h>
+#include <obd.h>
+#include <obd_class.h>
 #include <linux/list.h>
 
 #include "ptlrpc_internal.h"
@@ -65,8 +66,7 @@ void ptlrpc_initiate_recovery(struct obd_import *imp)
 int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 {
 	int rc = 0;
-	struct list_head *tmp, *pos;
-	struct ptlrpc_request *req = NULL;
+	struct ptlrpc_request *req = NULL, *pos;
 	__u64 last_transno;
 
 	*inflight = 0;
@@ -78,40 +78,21 @@ int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 	imp->imp_last_transno_checked = 0;
 	ptlrpc_free_committed(imp);
 	last_transno = imp->imp_last_replay_transno;
-	spin_unlock(&imp->imp_lock);
 
 	CDEBUG(D_HA, "import %p from %s committed %llu last %llu\n",
 	       imp, obd2cli_tgt(imp->imp_obd),
 	       imp->imp_peer_committed_transno, last_transno);
 
-	/* Do I need to hold a lock across this iteration?  We shouldn't be
-	 * racing with any additions to the list, because we're in recovery
-	 * and are therefore not processing additional requests to add.  Calls
-	 * to ptlrpc_free_committed might commit requests, but nothing "newer"
-	 * than the one we're replaying (it can't be committed until it's
-	 * replayed, and we're doing that here).  l_f_e_safe protects against
-	 * problems with the current request being committed, in the unlikely
-	 * event of that race.  So, in conclusion, I think that it's safe to
-	 * perform this list-walk without the imp_lock held.
-	 *
-	 * But, the {mdc,osc}_replay_open callbacks both iterate
-	 * request lists, and have comments saying they assume the
-	 * imp_lock is being held by ptlrpc_replay, but it's not. it's
-	 * just a little race...
-	 */
-
 	/* Replay all the committed open requests on committed_list first */
 	if (!list_empty(&imp->imp_committed_list)) {
-		tmp = imp->imp_committed_list.prev;
-		req = list_entry(tmp, struct ptlrpc_request, rq_replay_list);
+		req = list_last_entry(&imp->imp_committed_list,
+				      struct ptlrpc_request, rq_replay_list);
 
 		/* The last request on committed_list hasn't been replayed */
 		if (req->rq_transno > last_transno) {
-			/* Since the imp_committed_list is immutable before
-			 * all of it's requests being replayed, it's safe to
-			 * use a cursor to accelerate the search
-			 */
-			imp->imp_replay_cursor = imp->imp_replay_cursor->next;
+			if (!imp->imp_resend_replay ||
+			    imp->imp_replay_cursor == &imp->imp_committed_list)
+				imp->imp_replay_cursor = imp->imp_replay_cursor->next;
 
 			while (imp->imp_replay_cursor !=
 			       &imp->imp_committed_list) {
@@ -122,6 +103,7 @@ int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 					break;
 
 				req = NULL;
+				LASSERT(!list_empty(imp->imp_replay_cursor));
 				imp->imp_replay_cursor =
 					imp->imp_replay_cursor->next;
 			}
@@ -136,13 +118,13 @@ int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 	 * the imp_replay_list
 	 */
 	if (!req) {
-		list_for_each_safe(tmp, pos, &imp->imp_replay_list) {
-			req = list_entry(tmp, struct ptlrpc_request,
-					 rq_replay_list);
-
-			if (req->rq_transno > last_transno)
+		struct ptlrpc_request *tmp;
+		list_for_each_entry_safe(tmp, pos, &imp->imp_replay_list,
+					 rq_replay_list) {
+			if (tmp->rq_transno > last_transno) {
+				req = tmp;
 				break;
-			req = NULL;
+			}
 		}
 	}
 
@@ -154,11 +136,24 @@ int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 	if (req && imp->imp_resend_replay)
 		lustre_msg_add_flags(req->rq_reqmsg, MSG_RESENT);
 
-	spin_lock(&imp->imp_lock);
+	/* The resend replay request may have been removed from the
+	 * unreplied list.
+	 */
+	if (req && imp->imp_resend_replay &&
+	    list_empty(&req->rq_unreplied_list)) {
+		ptlrpc_add_unreplied(req);
+		imp->imp_known_replied_xid = ptlrpc_known_replied_xid(imp);
+	}
+
 	imp->imp_resend_replay = 0;
 	spin_unlock(&imp->imp_lock);
 
 	if (req) {
+		/* The request should have been added back in unreplied list
+		 * by ptlrpc_prepare_replay().
+		 */
+		LASSERT(!list_empty(&req->rq_unreplied_list));
+
 		rc = ptlrpc_replay_req(req);
 		if (rc) {
 			CERROR("recovery replay error %d for req %llu\n",
@@ -194,14 +189,20 @@ int ptlrpc_resend(struct obd_import *imp)
 		LASSERTF((long)req > PAGE_SIZE && req != LP_POISON,
 			 "req %p bad\n", req);
 		LASSERTF(req->rq_type != LI_POISON, "req %p freed\n", req);
-		if (!ptlrpc_no_resend(req))
+
+		/*
+		 * If the request is allowed to be sent during replay and it
+		 * is not timeout yet, then it does not need to be resent.
+		 */
+		if (!ptlrpc_no_resend(req) &&
+		    (req->rq_timedout || !req->rq_allow_replay))
 			ptlrpc_resend_req(req);
 	}
 	spin_unlock(&imp->imp_lock);
 
+	OBD_FAIL_TIMEOUT(OBD_FAIL_LDLM_ENQUEUE_OLD_EXPORT, 2);
 	return 0;
 }
-EXPORT_SYMBOL(ptlrpc_resend);
 
 /**
  * Go through all requests in delayed list and wake their threads
@@ -209,19 +210,15 @@ EXPORT_SYMBOL(ptlrpc_resend);
  */
 void ptlrpc_wake_delayed(struct obd_import *imp)
 {
-	struct list_head *tmp, *pos;
-	struct ptlrpc_request *req;
+	struct ptlrpc_request *req, *pos;
 
 	spin_lock(&imp->imp_lock);
-	list_for_each_safe(tmp, pos, &imp->imp_delayed_list) {
-		req = list_entry(tmp, struct ptlrpc_request, rq_list);
-
+	list_for_each_entry_safe(req, pos, &imp->imp_delayed_list, rq_list) {
 		DEBUG_REQ(D_HA, req, "waking (set %p):", req->rq_set);
 		ptlrpc_client_wake_req(req);
 	}
 	spin_unlock(&imp->imp_lock);
 }
-EXPORT_SYMBOL(ptlrpc_wake_delayed);
 
 void ptlrpc_request_handle_notconn(struct ptlrpc_request *failed_req)
 {
@@ -345,17 +342,15 @@ int ptlrpc_recover_import(struct obd_import *imp, char *new_uuid, int async)
 		goto out;
 
 	if (!async) {
-		struct l_wait_info lwi;
-		int secs = cfs_time_seconds(obd_timeout);
-
 		CDEBUG(D_HA, "%s: recovery started, waiting %u seconds\n",
-		       obd2cli_tgt(imp->imp_obd), secs);
+		       obd2cli_tgt(imp->imp_obd), obd_timeout);
 
-		lwi = LWI_TIMEOUT(secs, NULL, NULL);
-		rc = l_wait_event(imp->imp_recovery_waitq,
-				  !ptlrpc_import_in_recovery(imp), &lwi);
+		rc = wait_event_idle_timeout(imp->imp_recovery_waitq,
+					     !ptlrpc_import_in_recovery(imp),
+					     obd_timeout * HZ);
 		CDEBUG(D_HA, "%s: recovery finished\n",
 		       obd2cli_tgt(imp->imp_obd));
+		rc = rc ? 0 : -ETIMEDOUT;
 	}
 
 out:

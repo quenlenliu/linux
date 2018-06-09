@@ -175,7 +175,7 @@ static int pic32_rtc_gettime(struct device *dev, struct rtc_time *rtc_tm)
 		rtc_tm->tm_hour, rtc_tm->tm_min, rtc_tm->tm_sec);
 
 	clk_disable(pdata->clk);
-	return rtc_valid_tm(rtc_tm);
+	return 0;
 }
 
 static int pic32_rtc_settime(struct device *dev, struct rtc_time *tm)
@@ -400,7 +400,6 @@ static struct platform_driver pic32_rtc_driver = {
 	.remove		= pic32_rtc_remove,
 	.driver		= {
 		.name	= "pic32-rtc",
-		.owner	= THIS_MODULE,
 		.of_match_table	= of_match_ptr(pic32_rtc_dt_ids),
 	},
 };

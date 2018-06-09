@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015, 2016 Intel Corporation.
+ * Copyright(c) 2015-2017 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -49,7 +49,6 @@
 #include "hfi.h"
 #include "mad.h"
 #include "trace.h"
-#include "affinity.h"
 
 /*
  * Start of per-port congestion control structures and support code
@@ -96,7 +95,7 @@ static void port_release(struct kobject *kobj)
 	/* nothing to do since memory is freed by hfi1_free_devdata() */
 }
 
-static struct bin_attribute cc_table_bin_attr = {
+static const struct bin_attribute cc_table_bin_attr = {
 	.attr = {.name = "cc_table_bin", .mode = 0444},
 	.read = read_cc_table_bin,
 	.size = PAGE_SIZE,
@@ -138,7 +137,7 @@ static ssize_t read_cc_setting_bin(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static struct bin_attribute cc_setting_bin_attr = {
+static const struct bin_attribute cc_setting_bin_attr = {
 	.attr = {.name = "cc_settings_bin", .mode = 0444},
 	.read = read_cc_setting_bin,
 	.size = PAGE_SIZE,
@@ -197,7 +196,8 @@ static const struct sysfs_ops port_cc_sysfs_ops = {
 };
 
 static struct attribute *port_cc_default_attributes[] = {
-	&cc_prescan_attr.attr
+	&cc_prescan_attr.attr,
+	NULL
 };
 
 static struct kobj_type port_cc_ktype = {
@@ -543,7 +543,7 @@ static ssize_t show_nctxts(struct device *device,
 	 * give a more accurate picture of total contexts available.
 	 */
 	return scnprintf(buf, PAGE_SIZE, "%u\n",
-			 min(dd->num_rcv_contexts - dd->first_user_ctxt,
+			 min(dd->num_user_contexts,
 			     (u32)dd->sc_sizes[SC_USER].count));
 }
 
@@ -623,27 +623,6 @@ static ssize_t show_tempsense(struct device *device,
 	return ret;
 }
 
-static ssize_t show_sdma_affinity(struct device *device,
-				  struct device_attribute *attr, char *buf)
-{
-	struct hfi1_ibdev *dev =
-		container_of(device, struct hfi1_ibdev, rdi.ibdev.dev);
-	struct hfi1_devdata *dd = dd_from_dev(dev);
-
-	return hfi1_get_sdma_affinity(dd, buf);
-}
-
-static ssize_t store_sdma_affinity(struct device *device,
-				   struct device_attribute *attr,
-				   const char *buf, size_t count)
-{
-	struct hfi1_ibdev *dev =
-		container_of(device, struct hfi1_ibdev, rdi.ibdev.dev);
-	struct hfi1_devdata *dd = dd_from_dev(dev);
-
-	return hfi1_set_sdma_affinity(dd, buf, count);
-}
-
 /*
  * end of per-unit (or driver, in some cases, but replicated
  * per unit) functions
@@ -658,8 +637,6 @@ static DEVICE_ATTR(serial, S_IRUGO, show_serial, NULL);
 static DEVICE_ATTR(boardversion, S_IRUGO, show_boardversion, NULL);
 static DEVICE_ATTR(tempsense, S_IRUGO, show_tempsense, NULL);
 static DEVICE_ATTR(chip_reset, S_IWUSR, NULL, store_chip_reset);
-static DEVICE_ATTR(sdma_affinity, S_IWUSR | S_IRUGO, show_sdma_affinity,
-		   store_sdma_affinity);
 
 static struct device_attribute *hfi1_attributes[] = {
 	&dev_attr_hw_rev,
@@ -670,7 +647,6 @@ static struct device_attribute *hfi1_attributes[] = {
 	&dev_attr_boardversion,
 	&dev_attr_tempsense,
 	&dev_attr_chip_reset,
-	&dev_attr_sdma_affinity,
 };
 
 int hfi1_create_port_files(struct ib_device *ibdev, u8 port_num,
@@ -766,13 +742,95 @@ bail:
 	return ret;
 }
 
+struct sde_attribute {
+	struct attribute attr;
+	ssize_t (*show)(struct sdma_engine *sde, char *buf);
+	ssize_t (*store)(struct sdma_engine *sde, const char *buf, size_t cnt);
+};
+
+static ssize_t sde_show(struct kobject *kobj, struct attribute *attr, char *buf)
+{
+	struct sde_attribute *sde_attr =
+		container_of(attr, struct sde_attribute, attr);
+	struct sdma_engine *sde =
+		container_of(kobj, struct sdma_engine, kobj);
+
+	if (!sde_attr->show)
+		return -EINVAL;
+
+	return sde_attr->show(sde, buf);
+}
+
+static ssize_t sde_store(struct kobject *kobj, struct attribute *attr,
+			 const char *buf, size_t count)
+{
+	struct sde_attribute *sde_attr =
+		container_of(attr, struct sde_attribute, attr);
+	struct sdma_engine *sde =
+		container_of(kobj, struct sdma_engine, kobj);
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (!sde_attr->store)
+		return -EINVAL;
+
+	return sde_attr->store(sde, buf, count);
+}
+
+static const struct sysfs_ops sde_sysfs_ops = {
+	.show = sde_show,
+	.store = sde_store,
+};
+
+static struct kobj_type sde_ktype = {
+	.sysfs_ops = &sde_sysfs_ops,
+};
+
+#define SDE_ATTR(_name, _mode, _show, _store) \
+	struct sde_attribute sde_attr_##_name = \
+		__ATTR(_name, _mode, _show, _store)
+
+static ssize_t sde_show_cpu_to_sde_map(struct sdma_engine *sde, char *buf)
+{
+	return sdma_get_cpu_to_sde_map(sde, buf);
+}
+
+static ssize_t sde_store_cpu_to_sde_map(struct sdma_engine *sde,
+					const char *buf, size_t count)
+{
+	return sdma_set_cpu_to_sde_map(sde, buf, count);
+}
+
+static ssize_t sde_show_vl(struct sdma_engine *sde, char *buf)
+{
+	int vl;
+
+	vl = sdma_engine_get_vl(sde);
+	if (vl < 0)
+		return vl;
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", vl);
+}
+
+static SDE_ATTR(cpu_list, S_IWUSR | S_IRUGO,
+		sde_show_cpu_to_sde_map,
+		sde_store_cpu_to_sde_map);
+static SDE_ATTR(vl, S_IRUGO, sde_show_vl, NULL);
+
+static struct sde_attribute *sde_attribs[] = {
+	&sde_attr_cpu_list,
+	&sde_attr_vl
+};
+
 /*
  * Register and create our files in /sys/class/infiniband.
  */
 int hfi1_verbs_register_sysfs(struct hfi1_devdata *dd)
 {
 	struct ib_device *dev = &dd->verbs_dev.rdi.ibdev;
-	int i, ret;
+	struct device *class_dev = &dev->dev;
+	int i, j, ret;
 
 	for (i = 0; i < ARRAY_SIZE(hfi1_attributes); ++i) {
 		ret = device_create_file(&dev->dev, hfi1_attributes[i]);
@@ -780,10 +838,29 @@ int hfi1_verbs_register_sysfs(struct hfi1_devdata *dd)
 			goto bail;
 	}
 
+	for (i = 0; i < dd->num_sdma; i++) {
+		ret = kobject_init_and_add(&dd->per_sdma[i].kobj,
+					   &sde_ktype, &class_dev->kobj,
+					   "sdma%d", i);
+		if (ret)
+			goto bail;
+
+		for (j = 0; j < ARRAY_SIZE(sde_attribs); j++) {
+			ret = sysfs_create_file(&dd->per_sdma[i].kobj,
+						&sde_attribs[j]->attr);
+			if (ret)
+				goto bail;
+		}
+	}
+
 	return 0;
 bail:
 	for (i = 0; i < ARRAY_SIZE(hfi1_attributes); ++i)
 		device_remove_file(&dev->dev, hfi1_attributes[i]);
+
+	for (i = 0; i < dd->num_sdma; i++)
+		kobject_del(&dd->per_sdma[i].kobj);
+
 	return ret;
 }
 

@@ -125,7 +125,7 @@ xfs_fs_set_info(
 	struct xfs_mount *mp = XFS_M(sb);
 	struct qc_dqblk newlim;
 
-	if (sb->s_flags & MS_RDONLY)
+	if (sb_rdonly(sb))
 		return -EROFS;
 	if (!XFS_IS_QUOTA_RUNNING(mp))
 		return -ENOSYS;
@@ -175,7 +175,7 @@ xfs_quota_enable(
 {
 	struct xfs_mount	*mp = XFS_M(sb);
 
-	if (sb->s_flags & MS_RDONLY)
+	if (sb_rdonly(sb))
 		return -EROFS;
 	if (!XFS_IS_QUOTA_RUNNING(mp))
 		return -ENOSYS;
@@ -190,7 +190,7 @@ xfs_quota_disable(
 {
 	struct xfs_mount	*mp = XFS_M(sb);
 
-	if (sb->s_flags & MS_RDONLY)
+	if (sb_rdonly(sb))
 		return -EROFS;
 	if (!XFS_IS_QUOTA_RUNNING(mp))
 		return -ENOSYS;
@@ -208,7 +208,7 @@ xfs_fs_rm_xquota(
 	struct xfs_mount	*mp = XFS_M(sb);
 	unsigned int		flags = 0;
 
-	if (sb->s_flags & MS_RDONLY)
+	if (sb_rdonly(sb))
 		return -EROFS;
 
 	if (XFS_IS_QUOTA_ON(mp))
@@ -239,8 +239,7 @@ xfs_fs_get_dqblk(
 		return -ESRCH;
 
 	id = from_kqid(&init_user_ns, qid);
-	return xfs_qm_scall_getquota(mp, &id,
-				      xfs_quota_type(qid.type), qdq, 0);
+	return xfs_qm_scall_getquota(mp, id, xfs_quota_type(qid.type), qdq);
 }
 
 /* Return quota info for active quota >= this qid */
@@ -260,16 +259,14 @@ xfs_fs_get_nextdqblk(
 		return -ESRCH;
 
 	id = from_kqid(&init_user_ns, *qid);
-	ret = xfs_qm_scall_getquota(mp, &id,
-				    xfs_quota_type(qid->type), qdq,
-				    XFS_QMOPT_DQNEXT);
+	ret = xfs_qm_scall_getquota_next(mp, &id, xfs_quota_type(qid->type),
+			qdq);
 	if (ret)
 		return ret;
 
 	/* ID may be different, so convert back what we got */
 	*qid = make_kqid(current_user_ns(), qid->type, id);
 	return 0;
-	
 }
 
 STATIC int
@@ -280,7 +277,7 @@ xfs_fs_set_dqblk(
 {
 	struct xfs_mount	*mp = XFS_M(sb);
 
-	if (sb->s_flags & MS_RDONLY)
+	if (sb_rdonly(sb))
 		return -EROFS;
 	if (!XFS_IS_QUOTA_RUNNING(mp))
 		return -ENOSYS;

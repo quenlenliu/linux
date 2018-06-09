@@ -417,7 +417,6 @@ static ssize_t ad5755_write_powerdown(struct iio_dev *indio_dev, uintptr_t priv,
 static const struct iio_info ad5755_info = {
 	.read_raw = ad5755_read_raw,
 	.write_raw = ad5755_write_raw,
-	.driver_module = THIS_MODULE,
 };
 
 static const struct iio_chan_spec_ext_info ad5755_ext_info[] = {
@@ -655,7 +654,7 @@ static struct ad5755_platform_data *ad5755_parse_dt(struct device *dev)
 
 	devnr = 0;
 	for_each_child_of_node(np, pp) {
-		if (devnr > AD5755_NUM_CHANNELS) {
+		if (devnr >= AD5755_NUM_CHANNELS) {
 			dev_err(dev,
 				"There is to many channels defined in DT\n");
 			goto error_out;

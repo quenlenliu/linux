@@ -124,10 +124,10 @@ static unsigned int icp_native_get_irq(void)
 	unsigned int irq;
 
 	if (vec == XICS_IRQ_SPURIOUS)
-		return NO_IRQ;
+		return 0;
 
 	irq = irq_find_mapping(xics_host, vec);
-	if (likely(irq != NO_IRQ)) {
+	if (likely(irq)) {
 		xics_push_cppr(vec);
 		return irq;
 	}
@@ -138,24 +138,14 @@ static unsigned int icp_native_get_irq(void)
 	/* We might learn about it later, so EOI it */
 	icp_native_set_xirr(xirr);
 
-	return NO_IRQ;
+	return 0;
 }
 
 #ifdef CONFIG_SMP
 
-static void icp_native_cause_ipi(int cpu, unsigned long data)
+static void icp_native_cause_ipi(int cpu)
 {
 	kvmppc_set_host_ipi(cpu, 1);
-#ifdef CONFIG_PPC_DOORBELL
-	if (cpu_has_feature(CPU_FTR_DBELL)) {
-		if (cpumask_test_cpu(cpu, cpu_sibling_mask(get_cpu()))) {
-			doorbell_cause_ipi(cpu, data);
-			put_cpu();
-			return;
-		}
-		put_cpu();
-	}
-#endif
 	icp_native_set_qirr(cpu, IPI_PRIORITY);
 }
 
@@ -168,15 +158,15 @@ void icp_native_cause_ipi_rm(int cpu)
 	 * Need the physical address of the XICS to be
 	 * previously saved in kvm_hstate in the paca.
 	 */
-	unsigned long xics_phys;
+	void __iomem *xics_phys;
 
 	/*
 	 * Just like the cause_ipi functions, it is required to
-	 * include a full barrier (out8 includes a sync) before
-	 * causing the IPI.
+	 * include a full barrier before causing the IPI.
 	 */
-	xics_phys = paca[cpu].kvm_hstate.xics_phys;
-	out_rm8((u8 *)(xics_phys + XICS_MFRR), IPI_PRIORITY);
+	xics_phys = paca_ptrs[cpu]->kvm_hstate.xics_phys;
+	mb();
+	__raw_rm_writeb(IPI_PRIORITY, xics_phys + XICS_MFRR);
 }
 #endif
 
@@ -251,18 +241,16 @@ static int __init icp_native_map_one_cpu(int hw_id, unsigned long addr,
 			  cpu, hw_id);
 
 	if (!request_mem_region(addr, size, rname)) {
-		pr_warning("icp_native: Could not reserve ICP MMIO"
-			   " for CPU %d, interrupt server #0x%x\n",
-			   cpu, hw_id);
+		pr_warn("icp_native: Could not reserve ICP MMIO for CPU %d, interrupt server #0x%x\n",
+			cpu, hw_id);
 		return -EBUSY;
 	}
 
 	icp_native_regs[cpu] = ioremap(addr, size);
 	kvmppc_set_xics_phys(cpu, addr);
 	if (!icp_native_regs[cpu]) {
-		pr_warning("icp_native: Failed ioremap for CPU %d, "
-			   "interrupt server #0x%x, addr %#lx\n",
-			   cpu, hw_id, addr);
+		pr_warn("icp_native: Failed ioremap for CPU %d, interrupt server #0x%x, addr %#lx\n",
+			cpu, hw_id, addr);
 		release_mem_region(addr, size);
 		return -ENOMEM;
 	}

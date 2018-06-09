@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -36,15 +37,15 @@
 
 #define DEBUG_SUBSYSTEM S_LNET
 
-#include "../../include/linux/lnet/lib-lnet.h"
+#include <linux/lnet/lib-lnet.h>
 
 /* must be called with lnet_res_lock held */
 void
-lnet_md_unlink(lnet_libmd_t *md)
+lnet_md_unlink(struct lnet_libmd *md)
 {
 	if (!(md->md_flags & LNET_MD_FLAG_ZOMBIE)) {
 		/* first unlink attempt... */
-		lnet_me_t *me = md->md_me;
+		struct lnet_me *me = md->md_me;
 
 		md->md_flags |= LNET_MD_FLAG_ZOMBIE;
 
@@ -80,11 +81,11 @@ lnet_md_unlink(lnet_libmd_t *md)
 
 	LASSERT(!list_empty(&md->md_list));
 	list_del_init(&md->md_list);
-	lnet_md_free(md);
+	kfree(md);
 }
 
 static int
-lnet_md_build(lnet_libmd_t *lmd, lnet_md_t *umd, int unlink)
+lnet_md_build(struct lnet_libmd *lmd, struct lnet_md *umd, int unlink)
 {
 	int i;
 	unsigned int niov;
@@ -134,11 +135,11 @@ lnet_md_build(lnet_libmd_t *lmd, lnet_md_t *umd, int unlink)
 
 		for (i = 0; i < (int)niov; i++) {
 			/* We take the page pointer on trust */
-			if (lmd->md_iov.kiov[i].kiov_offset +
-			    lmd->md_iov.kiov[i].kiov_len > PAGE_SIZE)
+			if (lmd->md_iov.kiov[i].bv_offset +
+			    lmd->md_iov.kiov[i].bv_len > PAGE_SIZE)
 				return -EINVAL; /* invalid length */
 
-			total_length += lmd->md_iov.kiov[i].kiov_len;
+			total_length += lmd->md_iov.kiov[i].bv_len;
 		}
 
 		lmd->md_length = total_length;
@@ -165,14 +166,14 @@ lnet_md_build(lnet_libmd_t *lmd, lnet_md_t *umd, int unlink)
 
 /* must be called with resource lock held */
 static int
-lnet_md_link(lnet_libmd_t *md, lnet_handle_eq_t eq_handle, int cpt)
+lnet_md_link(struct lnet_libmd *md, struct lnet_handle_eq eq_handle, int cpt)
 {
 	struct lnet_res_container *container = the_lnet.ln_md_containers[cpt];
 
 	/*
 	 * NB we are passed an allocated, but inactive md.
 	 * if we return success, caller may lnet_md_unlink() it.
-	 * otherwise caller may only lnet_md_free() it.
+	 * otherwise caller may only kfree() it.
 	 */
 	/*
 	 * This implementation doesn't know how to create START events or
@@ -185,7 +186,7 @@ lnet_md_link(lnet_libmd_t *md, lnet_handle_eq_t eq_handle, int cpt)
 	 * maybe there we shouldn't even allow LNET_EQ_NONE!)
 	 * LASSERT(!eq);
 	 */
-	if (!LNetHandleIsInvalid(eq_handle)) {
+	if (!LNetEQHandleIsInvalid(eq_handle)) {
 		md->md_eq = lnet_handle2eq(&eq_handle);
 
 		if (!md->md_eq)
@@ -204,7 +205,7 @@ lnet_md_link(lnet_libmd_t *md, lnet_handle_eq_t eq_handle, int cpt)
 
 /* must be called with lnet_res_lock held */
 void
-lnet_md_deconstruct(lnet_libmd_t *lmd, lnet_md_t *umd)
+lnet_md_deconstruct(struct lnet_libmd *lmd, struct lnet_md *umd)
 {
 	/* NB this doesn't copy out all the iov entries so when a
 	 * discontiguous MD is copied out, the target gets to know the
@@ -223,7 +224,7 @@ lnet_md_deconstruct(lnet_libmd_t *lmd, lnet_md_t *umd)
 }
 
 static int
-lnet_md_validate(lnet_md_t *umd)
+lnet_md_validate(struct lnet_md *umd)
 {
 	if (!umd->start && umd->length) {
 		CERROR("MD start pointer can not be NULL with length %u\n",
@@ -267,8 +268,8 @@ lnet_md_validate(lnet_md_t *umd)
  * a MD.
  */
 int
-LNetMDAttach(lnet_handle_me_t meh, lnet_md_t umd,
-	     lnet_unlink_t unlink, lnet_handle_md_t *handle)
+LNetMDAttach(struct lnet_handle_me meh, struct lnet_md umd,
+	     enum lnet_unlink unlink, struct lnet_handle_md *handle)
 {
 	LIST_HEAD(matches);
 	LIST_HEAD(drops);
@@ -292,11 +293,12 @@ LNetMDAttach(lnet_handle_me_t meh, lnet_md_t umd,
 		return -ENOMEM;
 
 	rc = lnet_md_build(md, &umd, unlink);
+	if (rc)
+		goto out_free;
+
 	cpt = lnet_cpt_of_cookie(meh.cookie);
 
 	lnet_res_lock(cpt);
-	if (rc)
-		goto failed;
 
 	me = lnet_handle2me(&meh);
 	if (!me)
@@ -307,7 +309,7 @@ LNetMDAttach(lnet_handle_me_t meh, lnet_md_t umd,
 		rc = lnet_md_link(md, umd.eq_handle, cpt);
 
 	if (rc)
-		goto failed;
+		goto out_unlock;
 
 	/*
 	 * attach this MD to portal of ME and check if it matches any
@@ -324,10 +326,10 @@ LNetMDAttach(lnet_handle_me_t meh, lnet_md_t umd,
 
 	return 0;
 
- failed:
-	lnet_md_free(md);
-
+out_unlock:
 	lnet_res_unlock(cpt);
+out_free:
+	kfree(md);
 	return rc;
 }
 EXPORT_SYMBOL(LNetMDAttach);
@@ -349,9 +351,10 @@ EXPORT_SYMBOL(LNetMDAttach);
  * LNetInvalidateHandle() on it.
  */
 int
-LNetMDBind(lnet_md_t umd, lnet_unlink_t unlink, lnet_handle_md_t *handle)
+LNetMDBind(struct lnet_md umd, enum lnet_unlink unlink,
+	   struct lnet_handle_md *handle)
 {
-	lnet_libmd_t *md;
+	struct lnet_libmd *md;
 	int cpt;
 	int rc;
 
@@ -370,24 +373,25 @@ LNetMDBind(lnet_md_t umd, lnet_unlink_t unlink, lnet_handle_md_t *handle)
 		return -ENOMEM;
 
 	rc = lnet_md_build(md, &umd, unlink);
+	if (rc)
+		goto out_free;
 
 	cpt = lnet_res_lock_current();
-	if (rc)
-		goto failed;
 
 	rc = lnet_md_link(md, umd.eq_handle, cpt);
 	if (rc)
-		goto failed;
+		goto out_unlock;
 
 	lnet_md2handle(handle, md);
 
 	lnet_res_unlock(cpt);
 	return 0;
 
- failed:
-	lnet_md_free(md);
-
+out_unlock:
 	lnet_res_unlock(cpt);
+out_free:
+	kfree(md);
+
 	return rc;
 }
 EXPORT_SYMBOL(LNetMDBind);
@@ -423,10 +427,10 @@ EXPORT_SYMBOL(LNetMDBind);
  * \retval -ENOENT If \a mdh does not point to a valid MD object.
  */
 int
-LNetMDUnlink(lnet_handle_md_t mdh)
+LNetMDUnlink(struct lnet_handle_md mdh)
 {
-	lnet_event_t ev;
-	lnet_libmd_t *md;
+	struct lnet_event ev;
+	struct lnet_libmd *md;
 	int cpt;
 
 	LASSERT(the_lnet.ln_refcount > 0);

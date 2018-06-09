@@ -1,17 +1,18 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 2006 Intel Corp.
  *	Tom Long Nguyen (tom.l.nguyen@intel.com)
  *	Zhang Yanmin (yanmin.zhang@intel.com)
- *
  */
 
 #ifndef _AERDRV_H_
 #define _AERDRV_H_
 
 #include <linux/workqueue.h>
-#include <linux/pcieport_if.h>
 #include <linux/aer.h>
 #include <linux/interrupt.h>
+
+#include "../portdrv.h"
 
 #define SYSTEM_ERROR_INTR_ON_MESG_MASK	(PCI_EXP_RTCTL_SECEE|	\
 					PCI_EXP_RTCTL_SENFEE|	\
@@ -57,9 +58,10 @@ struct aer_err_source {
 };
 
 struct aer_rpc {
-	struct pcie_device *rpd;	/* Root Port device */
+	struct pci_dev *rpd;		/* Root Port device */
 	struct work_struct dpc_handler;
 	struct aer_err_source e_sources[AER_ERROR_SOURCES_MAX];
+	struct aer_err_info e_info;
 	unsigned short prod_idx;	/* Error Producer Index */
 	unsigned short cons_idx;	/* Error Consumer Index */
 	int isr;
@@ -74,38 +76,7 @@ struct aer_rpc {
 					 */
 };
 
-struct aer_broadcast_data {
-	enum pci_channel_state state;
-	enum pci_ers_result result;
-};
-
-static inline pci_ers_result_t merge_result(enum pci_ers_result orig,
-		enum pci_ers_result new)
-{
-	if (new == PCI_ERS_RESULT_NO_AER_DRIVER)
-		return PCI_ERS_RESULT_NO_AER_DRIVER;
-
-	if (new == PCI_ERS_RESULT_NONE)
-		return orig;
-
-	switch (orig) {
-	case PCI_ERS_RESULT_CAN_RECOVER:
-	case PCI_ERS_RESULT_RECOVERED:
-		orig = new;
-		break;
-	case PCI_ERS_RESULT_DISCONNECT:
-		if (new == PCI_ERS_RESULT_NEED_RESET)
-			orig = PCI_ERS_RESULT_NEED_RESET;
-		break;
-	default:
-		break;
-	}
-
-	return orig;
-}
-
 extern struct bus_type pcie_port_bus_type;
-int aer_init(struct pcie_device *dev);
 void aer_isr(struct work_struct *work);
 void aer_print_error(struct pci_dev *dev, struct aer_err_info *info);
 void aer_print_port_info(struct pci_dev *dev, struct aer_err_info *info);
@@ -121,11 +92,4 @@ static inline int pcie_aer_get_firmware_first(struct pci_dev *pci_dev)
 	return 0;
 }
 #endif
-
-static inline void pcie_aer_force_firmware_first(struct pci_dev *pci_dev,
-						 int enable)
-{
-	pci_dev->__aer_firmware_first = !!enable;
-	pci_dev->__aer_firmware_first_valid = 1;
-}
 #endif /* _AERDRV_H_ */

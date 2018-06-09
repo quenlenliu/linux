@@ -28,6 +28,7 @@
 #include <asm/page.h>
 #include <asm/mmu.h>
 #include <asm/ppc_asm.h>
+#include <asm/head-64.h>
 #include <asm/asm-offsets.h>
 #include <asm/bug.h>
 #include <asm/cputable.h>
@@ -42,6 +43,7 @@
 #include <asm/hw_irq.h>
 #include <asm/cputhreads.h>
 #include <asm/ppc-opcode.h>
+#include <asm/export.h>
 
 /* The physical memory is laid out such that the secondary processor
  * spin code sits at 0x0000...0x00ff. On server, the vectors follow
@@ -53,21 +55,32 @@
  *
  *  For pSeries or server processors:
  *   1. The MMU is off & open firmware is running in real mode.
- *   2. The kernel is entered at __start
+ *   2. The primary CPU enters at __start.
+ *   3. If the RTAS supports "query-cpu-stopped-state", then secondary
+ *      CPUs will enter as directed by "start-cpu" RTAS call, which is
+ *      generic_secondary_smp_init, with PIR in r3.
+ *   4. Else the secondary CPUs will enter at secondary_hold (0x60) as
+ *      directed by the "start-cpu" RTS call, with PIR in r3.
  * -or- For OPAL entry:
- *   1. The MMU is off, processor in HV mode, primary CPU enters at 0
- *      with device-tree in gpr3. We also get OPAL base in r8 and
- *	entry in r9 for debugging purposes
- *   2. Secondary processors enter at 0x60 with PIR in gpr3
+ *   1. The MMU is off, processor in HV mode.
+ *   2. The primary CPU enters at 0 with device-tree in r3, OPAL base
+ *      in r8, and entry in r9 for debugging purposes.
+ *   3. Secondary CPUs enter as directed by OPAL_START_CPU call, which
+ *      is at generic_secondary_smp_init, with PIR in r3.
  *
  *  For Book3E processors:
  *   1. The MMU is on running in AS0 in a state defined in ePAPR
  *   2. The kernel is entered at __start
  */
 
-	.text
-	.globl  _stext
-_stext:
+OPEN_FIXED_SECTION(first_256B, 0x0, 0x100)
+USE_FIXED_SECTION(first_256B)
+	/*
+	 * Offsets are relative from the start of fixed section, and
+	 * first_256B starts at 0. Offsets are a bit easier to use here
+	 * than the fixed section entry macros.
+	 */
+	. = 0x0
 _GLOBAL(__start)
 	/* NOP this out unconditionally */
 BEGIN_FTR_SECTION
@@ -85,13 +98,13 @@ END_FTR_SECTION(0, 1)
 	.balign 8
 	.globl  __secondary_hold_spinloop
 __secondary_hold_spinloop:
-	.llong	0x0
+	.8byte	0x0
 
 	/* Secondary processors write this value with their cpu # */
 	/* after they enter the spin loop immediately below.	  */
 	.globl	__secondary_hold_acknowledge
 __secondary_hold_acknowledge:
-	.llong	0x0
+	.8byte	0x0
 
 #ifdef CONFIG_RELOCATABLE
 	/* This flag is set to 1 by a loader if the kernel should run
@@ -100,11 +113,19 @@ __secondary_hold_acknowledge:
 	 * crash_kernel region.  The loader is responsible for
 	 * observing the alignment requirement.
 	 */
+
+#ifdef CONFIG_RELOCATABLE_TEST
+#define RUN_AT_LOAD_DEFAULT 1		/* Test relocation, do not copy to 0 */
+#else
+#define RUN_AT_LOAD_DEFAULT 0x72756e30  /* "run0" -- relocate to 0 by default */
+#endif
+
 	/* Do not move this variable as kexec-tools knows about it. */
 	. = 0x5c
 	.globl	__run_at_load
 __run_at_load:
-	.long	0x72756e30	/* "run0" -- relocate to 0 by default */
+DEFINE_FIXED_SYMBOL(__run_at_load)
+	.long	RUN_AT_LOAD_DEFAULT
 #endif
 
 	. = 0x60
@@ -133,7 +154,7 @@ __secondary_hold:
 	/* Tell the master cpu we're here */
 	/* Relocation is off & we are located at an address less */
 	/* than 0x100, so only need to grab low order offset.    */
-	std	r24,__secondary_hold_acknowledge-_stext(0)
+	std	r24,(ABS_ADDR(__secondary_hold_acknowledge))(0)
 	sync
 
 	li	r26,0
@@ -141,11 +162,11 @@ __secondary_hold:
 	tovirt(r26,r26)
 #endif
 	/* All secondary cpus wait here until told to start. */
-100:	ld	r12,__secondary_hold_spinloop-_stext(r26)
+100:	ld	r12,(ABS_ADDR(__secondary_hold_spinloop))(r26)
 	cmpdi	0,r12,0
 	beq	100b
 
-#if defined(CONFIG_SMP) || defined(CONFIG_KEXEC)
+#if defined(CONFIG_SMP) || defined(CONFIG_KEXEC_CORE)
 #ifdef CONFIG_PPC_BOOK3E
 	tovirt(r12,r12)
 #endif
@@ -166,12 +187,13 @@ __secondary_hold:
 #else
 	BUG_OPCODE
 #endif
+CLOSE_FIXED_SECTION(first_256B)
 
 /* This value is used to mark exception frames on the stack. */
 	.section ".toc","aw"
 exception_marker:
 	.tc	ID_72656773_68657265[TC],0x7265677368657265
-	.text
+	.previous
 
 /*
  * On server, we include the exception vectors code here as it
@@ -180,7 +202,11 @@ exception_marker:
  */
 #ifdef CONFIG_PPC_BOOK3S
 #include "exceptions-64s.S"
+#else
+OPEN_TEXT_SECTION(0x100)
 #endif
+
+USE_TEXT_SECTION()
 
 #ifdef CONFIG_PPC_BOOK3E
 /*
@@ -201,9 +227,9 @@ booting_thread_hwid:
  */
 _GLOBAL(book3e_start_thread)
 	LOAD_REG_IMMEDIATE(r5, MSR_KERNEL)
-	cmpi	0, r3, 0
+	cmpwi	r3, 0
 	beq	10f
-	cmpi	0, r3, 1
+	cmpwi	r3, 1
 	beq	11f
 	/* If the thread id is invalid, just exit. */
 	b	13f
@@ -228,9 +254,9 @@ _GLOBAL(book3e_start_thread)
  * r3 = the thread physical id
  */
 _GLOBAL(book3e_stop_thread)
-	cmpi	0, r3, 0
+	cmpwi	r3, 0
 	beq	10f
-	cmpi	0, r3, 1
+	cmpwi	r3, 1
 	beq	10f
 	/* If the thread id is invalid, just exit. */
 	b	13f
@@ -366,19 +392,20 @@ generic_secondary_common_init:
 	 * physical cpu id in r24, we need to search the pacas to find
 	 * which logical id maps to our physical one.
 	 */
-	LOAD_REG_ADDR(r13, paca)	/* Load paca pointer		 */
-	ld	r13,0(r13)		/* Get base vaddr of paca array	 */
 #ifndef CONFIG_SMP
-	addi	r13,r13,PACA_SIZE	/* know r13 if used accidentally */
 	b	kexec_wait		/* wait for next kernel if !SMP	 */
 #else
+	LOAD_REG_ADDR(r8, paca_ptrs)	/* Load paca_ptrs pointe	 */
+	ld	r8,0(r8)		/* Get base vaddr of array	 */
 	LOAD_REG_ADDR(r7, nr_cpu_ids)	/* Load nr_cpu_ids address       */
 	lwz	r7,0(r7)		/* also the max paca allocated 	 */
 	li	r5,0			/* logical cpu id                */
-1:	lhz	r6,PACAHWCPUID(r13)	/* Load HW procid from paca      */
+1:
+	sldi	r9,r5,3			/* get paca_ptrs[] index from cpu id */
+	ldx	r13,r9,r8		/* r13 = paca_ptrs[cpu id]       */
+	lhz	r6,PACAHWCPUID(r13)	/* Load HW procid from paca      */
 	cmpw	r6,r24			/* Compare to our id             */
 	beq	2f
-	addi	r13,r13,PACA_SIZE	/* Loop to next PACA on miss     */
 	addi	r5,r5,1
 	cmpw	r5,r7			/* Check if more pacas exist     */
 	blt	1b
@@ -558,7 +585,7 @@ __after_prom_start:
 #if defined(CONFIG_PPC_BOOK3E)
 	tovirt(r26,r26)		/* on booke, we already run at PAGE_OFFSET */
 #endif
-	lwz	r7,__run_at_load-_stext(r26)
+	lwz	r7,(FIXED_SYMBOL_ABS_ADDR(__run_at_load))(r26)
 #if defined(CONFIG_PPC_BOOK3E)
 	tophys(r26,r26)
 #endif
@@ -601,7 +628,7 @@ __after_prom_start:
 #if defined(CONFIG_PPC_BOOK3E)
 	tovirt(r26,r26)		/* on booke, we already run at PAGE_OFFSET */
 #endif
-	lwz	r7,__run_at_load-_stext(r26)
+	lwz	r7,(FIXED_SYMBOL_ABS_ADDR(__run_at_load))(r26)
 	cmplwi	cr0,r7,1
 	bne	3f
 
@@ -611,28 +638,35 @@ __after_prom_start:
 	sub	r5,r5,r11
 #else
 	/* just copy interrupts */
-	LOAD_REG_IMMEDIATE(r5, __end_interrupts - _stext)
+	LOAD_REG_IMMEDIATE(r5, FIXED_SYMBOL_ABS_ADDR(__end_interrupts))
 #endif
 	b	5f
 3:
 #endif
-	lis	r5,(copy_to_here - _stext)@ha
-	addi	r5,r5,(copy_to_here - _stext)@l /* # bytes of memory to copy */
+	/* # bytes of memory to copy */
+	lis	r5,(ABS_ADDR(copy_to_here))@ha
+	addi	r5,r5,(ABS_ADDR(copy_to_here))@l
 
 	bl	copy_and_flush		/* copy the first n bytes	 */
 					/* this includes the code being	 */
 					/* executed here.		 */
-	addis	r8,r3,(4f - _stext)@ha	/* Jump to the copy of this code */
-	addi	r12,r8,(4f - _stext)@l	/* that we just made */
+	/* Jump to the copy of this code that we just made */
+	addis	r8,r3,(ABS_ADDR(4f))@ha
+	addi	r12,r8,(ABS_ADDR(4f))@l
 	mtctr	r12
 	bctr
 
 .balign 8
-p_end:	.llong	_end - _stext
+p_end: .8byte _end - copy_to_here
 
-4:	/* Now copy the rest of the kernel up to _end */
-	addis	r5,r26,(p_end - _stext)@ha
-	ld	r5,(p_end - _stext)@l(r5)	/* get _end */
+4:
+	/*
+	 * Now copy the rest of the kernel up to _end, add
+	 * _end - copy_to_here to the copy limit and run again.
+	 */
+	addis   r8,r26,(ABS_ADDR(p_end))@ha
+	ld      r8,(ABS_ADDR(p_end))@l(r8)
+	add	r5,r5,r8
 5:	bl	copy_and_flush		/* copy the rest */
 
 9:	b	start_here_multiplatform
@@ -723,17 +757,17 @@ _GLOBAL(pmac_secondary_start)
 	mtmsrd	r3			/* RI on */
 
 	/* Set up a paca value for this processor. */
-	LOAD_REG_ADDR(r4,paca)		/* Load paca pointer		*/
-	ld	r4,0(r4)		/* Get base vaddr of paca array	*/
-	mulli	r13,r24,PACA_SIZE	/* Calculate vaddr of right paca */
-	add	r13,r13,r4		/* for this processor.		*/
+	LOAD_REG_ADDR(r4,paca_ptrs)	/* Load paca pointer		*/
+	ld	r4,0(r4)		/* Get base vaddr of paca_ptrs array */
+	sldi	r5,r24,3		/* get paca_ptrs[] index from cpu id */
+	ldx	r13,r5,r4		/* r13 = paca_ptrs[cpu id]       */
 	SET_PACA(r13)			/* Save vaddr of paca in an SPRG*/
 
 	/* Mark interrupts soft and hard disabled (they might be enabled
 	 * in the PACA when doing hotplug)
 	 */
-	li	r0,0
-	stb	r0,PACASOFTIRQEN(r13)
+	li	r0,IRQS_DISABLED
+	stb	r0,PACAIRQSOFTMASK(r13)
 	li	r0,PACA_IRQ_HARD_DIS
 	stb	r0,PACAIRQHAPPENED(r13)
 
@@ -789,7 +823,8 @@ __secondary_start:
 	/* Mark interrupts soft and hard disabled (they might be enabled
 	 * in the PACA when doing hotplug)
 	 */
-	stb	r7,PACASOFTIRQEN(r13)
+	li	r7,IRQS_DISABLED
+	stb	r7,PACAIRQSOFTMASK(r13)
 	li	r0,PACA_IRQ_HARD_DIS
 	stb	r0,PACAIRQHAPPENED(r13)
 
@@ -865,7 +900,7 @@ _GLOBAL(relative_toc)
 	blr
 
 .balign 8
-p_toc:	.llong	__toc_start + 0x8000 - 0b
+p_toc:	.8byte	__toc_start + 0x8000 - 0b
 
 /*
  * This is where the main kernel code starts.
@@ -922,7 +957,8 @@ start_here_multiplatform:
 	LOAD_REG_ADDR(r3,init_thread_union)
 
 	/* set up a stack pointer */
-	addi	r1,r3,THREAD_SIZE
+	LOAD_REG_IMMEDIATE(r1,THREAD_SIZE)
+	add	r1,r3,r1
 	li	r0,0
 	stdu	r0,-STACK_FRAME_OVERHEAD(r1)
 
@@ -954,8 +990,8 @@ start_here_common:
 	/* Mark interrupts soft and hard disabled (they might be enabled
 	 * in the PACA when doing hotplug)
 	 */
-	li	r0,0
-	stb	r0,PACASOFTIRQEN(r13)
+	li	r0,IRQS_DISABLED
+	stb	r0,PACAIRQSOFTMASK(r13)
 	li	r0,PACA_IRQ_HARD_DIS
 	stb	r0,PACAIRQHAPPENED(r13)
 
@@ -983,3 +1019,4 @@ swapper_pg_dir:
 	.globl	empty_zero_page
 empty_zero_page:
 	.space	PAGE_SIZE
+EXPORT_SYMBOL(empty_zero_page)

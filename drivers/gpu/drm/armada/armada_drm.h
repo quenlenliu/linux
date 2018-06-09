@@ -53,6 +53,7 @@ struct armada_variant {
 extern const struct armada_variant armada510_ops;
 
 struct armada_private {
+	struct drm_device	drm;
 	struct work_struct	fb_unref_work;
 	DECLARE_KFIFO(fb_unref, struct drm_framebuffer *, 8);
 	struct drm_fb_helper	*fbdev;
@@ -83,12 +84,10 @@ void armada_drm_queue_unref_work(struct drm_device *,
 extern const struct drm_mode_config_funcs armada_drm_mode_config_funcs;
 
 int armada_fbdev_init(struct drm_device *);
-void armada_fbdev_lastclose(struct drm_device *);
 void armada_fbdev_fini(struct drm_device *);
 
 int armada_overlay_plane_create(struct drm_device *, unsigned long);
 
 int armada_drm_debugfs_init(struct drm_minor *);
-void armada_drm_debugfs_cleanup(struct drm_minor *);
 
 #endif

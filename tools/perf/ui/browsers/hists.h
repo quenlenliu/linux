@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _PERF_UI_BROWSER_HISTS_H_
 #define _PERF_UI_BROWSER_HISTS_H_ 1
 
@@ -18,6 +19,7 @@ struct hist_browser {
 	u64		     nr_non_filtered_entries;
 	u64		     nr_hierarchy_entries;
 	u64		     nr_callchain_rows;
+	bool		     c2c_filter;
 
 	/* Get title string. */
 	int                  (*title)(struct hist_browser *browser,
@@ -26,7 +28,8 @@ struct hist_browser {
 
 struct hist_browser *hist_browser__new(struct hists *hists);
 void hist_browser__delete(struct hist_browser *browser);
-int hist_browser__run(struct hist_browser *browser, const char *help);
+int hist_browser__run(struct hist_browser *browser, const char *help,
+		      bool warn_lost_event);
 void hist_browser__init(struct hist_browser *browser,
 			struct hists *hists);
 #endif /* _PERF_UI_BROWSER_HISTS_H_ */

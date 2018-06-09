@@ -1,17 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * atlas-ph-sensor.c - Support for Atlas Scientific OEM pH-SM sensor
  *
- * Copyright (C) 2015 Matt Ranostay <mranostay@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
+ * Copyright (C) 2015-2018 Matt Ranostay
+ * Author: Matt Ranostay <matt.ranostay@konsulko.com>
  */
 
 #include <linux/module.h>
@@ -66,12 +58,17 @@
 #define ATLAS_REG_TDS_DATA		0x1c
 #define ATLAS_REG_PSS_DATA		0x20
 
+#define ATLAS_REG_ORP_CALIB_STATUS	0x0d
+#define ATLAS_REG_ORP_DATA		0x0e
+
 #define ATLAS_PH_INT_TIME_IN_US		450000
 #define ATLAS_EC_INT_TIME_IN_US		650000
+#define ATLAS_ORP_INT_TIME_IN_US	450000
 
 enum {
 	ATLAS_PH_SM,
 	ATLAS_EC_SM,
+	ATLAS_ORP_SM,
 };
 
 struct atlas_data {
@@ -84,26 +81,10 @@ struct atlas_data {
 	__be32 buffer[6]; /* 96-bit data + 32-bit pad + 64-bit timestamp */
 };
 
-static const struct regmap_range atlas_volatile_ranges[] = {
-	regmap_reg_range(ATLAS_REG_INT_CONTROL, ATLAS_REG_INT_CONTROL),
-	regmap_reg_range(ATLAS_REG_PH_DATA, ATLAS_REG_PH_DATA + 4),
-	regmap_reg_range(ATLAS_REG_EC_DATA, ATLAS_REG_PSS_DATA + 4),
-};
-
-static const struct regmap_access_table atlas_volatile_table = {
-	.yes_ranges	= atlas_volatile_ranges,
-	.n_yes_ranges	= ARRAY_SIZE(atlas_volatile_ranges),
-};
-
 static const struct regmap_config atlas_regmap_config = {
 	.name = ATLAS_REGMAP_NAME,
-
 	.reg_bits = 8,
 	.val_bits = 8,
-
-	.volatile_table = &atlas_volatile_table,
-	.max_register = ATLAS_REG_PSS_DATA + 4,
-	.cache_type = REGCACHE_RBTREE,
 };
 
 static const struct iio_chan_spec atlas_ph_channels[] = {
@@ -175,6 +156,23 @@ static const struct iio_chan_spec atlas_ec_channels[] = {
 	},
 };
 
+static const struct iio_chan_spec atlas_orp_channels[] = {
+	{
+		.type = IIO_VOLTAGE,
+		.address = ATLAS_REG_ORP_DATA,
+		.info_mask_separate =
+			BIT(IIO_CHAN_INFO_RAW) | BIT(IIO_CHAN_INFO_SCALE),
+		.scan_index = 0,
+		.scan_type = {
+			.sign = 's',
+			.realbits = 32,
+			.storagebits = 32,
+			.endianness = IIO_BE,
+		},
+	},
+	IIO_CHAN_SOFT_TIMESTAMP(1),
+};
+
 static int atlas_check_ph_calibration(struct atlas_data *data)
 {
 	struct device *dev = &data->client->dev;
@@ -207,13 +205,14 @@ static int atlas_check_ec_calibration(struct atlas_data *data)
 	struct device *dev = &data->client->dev;
 	int ret;
 	unsigned int val;
+	__be16	rval;
 
-	ret = regmap_bulk_read(data->regmap, ATLAS_REG_EC_PROBE, &val, 2);
+	ret = regmap_bulk_read(data->regmap, ATLAS_REG_EC_PROBE, &rval, 2);
 	if (ret)
 		return ret;
 
-	dev_info(dev, "probe set to K = %d.%.2d", be16_to_cpu(val) / 100,
-						 be16_to_cpu(val) % 100);
+	val = be16_to_cpu(rval);
+	dev_info(dev, "probe set to K = %d.%.2d", val / 100, val % 100);
 
 	ret = regmap_read(data->regmap, ATLAS_REG_EC_CALIB_STATUS, &val);
 	if (ret)
@@ -240,6 +239,22 @@ static int atlas_check_ec_calibration(struct atlas_data *data)
 	return 0;
 }
 
+static int atlas_check_orp_calibration(struct atlas_data *data)
+{
+	struct device *dev = &data->client->dev;
+	int ret;
+	unsigned int val;
+
+	ret = regmap_read(data->regmap, ATLAS_REG_ORP_CALIB_STATUS, &val);
+	if (ret)
+		return ret;
+
+	if (!val)
+		dev_warn(dev, "device has not been calibrated\n");
+
+	return 0;
+};
+
 struct atlas_device {
 	const struct iio_chan_spec *channels;
 	int num_channels;
@@ -264,7 +279,13 @@ static struct atlas_device atlas_devices[] = {
 				.calibration = &atlas_check_ec_calibration,
 				.delay = ATLAS_EC_INT_TIME_IN_US,
 	},
-
+	[ATLAS_ORP_SM] = {
+				.channels = atlas_orp_channels,
+				.num_channels = 2,
+				.data_reg = ATLAS_REG_ORP_DATA,
+				.calibration = &atlas_check_orp_calibration,
+				.delay = ATLAS_ORP_INT_TIME_IN_US,
+	},
 };
 
 static int atlas_set_powermode(struct atlas_data *data, int on)
@@ -315,7 +336,6 @@ static int atlas_buffer_predisable(struct iio_dev *indio_dev)
 }
 
 static const struct iio_trigger_ops atlas_interrupt_trigger_ops = {
-	.owner = THIS_MODULE,
 };
 
 static const struct iio_buffer_setup_ops atlas_buffer_setup_ops = {
@@ -402,15 +422,14 @@ static int atlas_read_raw(struct iio_dev *indio_dev,
 		case IIO_PH:
 		case IIO_CONCENTRATION:
 		case IIO_ELECTRICALCONDUCTIVITY:
-			mutex_lock(&indio_dev->mlock);
+		case IIO_VOLTAGE:
+			ret = iio_device_claim_direct_mode(indio_dev);
+			if (ret)
+				return ret;
 
-			if (iio_buffer_enabled(indio_dev))
-				ret = -EBUSY;
-			else
-				ret = atlas_read_measurement(data,
-							chan->address, &reg);
+			ret = atlas_read_measurement(data, chan->address, &reg);
 
-			mutex_unlock(&indio_dev->mlock);
+			iio_device_release_direct_mode(indio_dev);
 			break;
 		default:
 			ret = -EINVAL;
@@ -440,6 +459,10 @@ static int atlas_read_raw(struct iio_dev *indio_dev,
 			*val = 0; /* 0.000000001 */
 			*val2 = 1000;
 			return IIO_VAL_INT_PLUS_NANO;
+		case IIO_VOLTAGE:
+			*val = 1; /* 0.1 */
+			*val2 = 10;
+			break;
 		default:
 			return -EINVAL;
 		}
@@ -467,7 +490,6 @@ static int atlas_write_raw(struct iio_dev *indio_dev,
 }
 
 static const struct iio_info atlas_info = {
-	.driver_module = THIS_MODULE,
 	.read_raw = atlas_read_raw,
 	.write_raw = atlas_write_raw,
 };
@@ -475,6 +497,7 @@ static const struct iio_info atlas_info = {
 static const struct i2c_device_id atlas_id[] = {
 	{ "atlas-ph-sm", ATLAS_PH_SM},
 	{ "atlas-ec-sm", ATLAS_EC_SM},
+	{ "atlas-orp-sm", ATLAS_ORP_SM},
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, atlas_id);
@@ -482,6 +505,7 @@ MODULE_DEVICE_TABLE(i2c, atlas_id);
 static const struct of_device_id atlas_dt_ids[] = {
 	{ .compatible = "atlas,ph-sm", .data = (void *)ATLAS_PH_SM, },
 	{ .compatible = "atlas,ec-sm", .data = (void *)ATLAS_EC_SM, },
+	{ .compatible = "atlas,orp-sm", .data = (void *)ATLAS_ORP_SM, },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, atlas_dt_ids);
@@ -657,6 +681,6 @@ static struct i2c_driver atlas_driver = {
 };
 module_i2c_driver(atlas_driver);
 
-MODULE_AUTHOR("Matt Ranostay <mranostay@gmail.com>");
+MODULE_AUTHOR("Matt Ranostay <matt.ranostay@konsulko.com>");
 MODULE_DESCRIPTION("Atlas Scientific pH-SM sensor");
 MODULE_LICENSE("GPL");

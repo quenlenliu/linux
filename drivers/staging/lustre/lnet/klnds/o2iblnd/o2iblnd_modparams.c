@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -106,7 +107,8 @@ static int concurrent_sends;
 module_param(concurrent_sends, int, 0444);
 MODULE_PARM_DESC(concurrent_sends, "send work-queue sizing");
 
-static int map_on_demand;
+#define IBLND_DEFAULT_MAP_ON_DEMAND IBLND_MAX_RDMA_FRAGS
+static int map_on_demand = IBLND_DEFAULT_MAP_ON_DEMAND;
 module_param(map_on_demand, int, 0444);
 MODULE_PARM_DESC(map_on_demand, "map on demand");
 
@@ -160,7 +162,7 @@ struct kib_tunables kiblnd_tunables = {
 static struct lnet_ioctl_config_o2iblnd_tunables default_tunables;
 
 /* # messages/RDMAs in-flight */
-int kiblnd_msg_queue_size(int version, lnet_ni_t *ni)
+int kiblnd_msg_queue_size(int version, struct lnet_ni *ni)
 {
 	if (version == IBLND_MSG_VERSION_1)
 		return IBLND_MSG_QUEUE_SIZE_V1;
@@ -179,8 +181,8 @@ int kiblnd_tunables_setup(struct lnet_ni *ni)
 	 * defaulted
 	 */
 	if (!ni->ni_lnd_tunables) {
-		LIBCFS_ALLOC(ni->ni_lnd_tunables,
-			     sizeof(*ni->ni_lnd_tunables));
+		ni->ni_lnd_tunables = kzalloc(sizeof(*ni->ni_lnd_tunables),
+					      GFP_NOFS);
 		if (!ni->ni_lnd_tunables)
 			return -ENOMEM;
 
@@ -228,10 +230,13 @@ int kiblnd_tunables_setup(struct lnet_ni *ni)
 	if (tunables->lnd_peercredits_hiw >= ni->ni_peertxcredits)
 		tunables->lnd_peercredits_hiw = ni->ni_peertxcredits - 1;
 
-	if (tunables->lnd_map_on_demand < 0 ||
+	if (tunables->lnd_map_on_demand <= 0 ||
 	    tunables->lnd_map_on_demand > IBLND_MAX_RDMA_FRAGS) {
-		/* disable map-on-demand */
-		tunables->lnd_map_on_demand = 0;
+		/* Use the default */
+		CWARN("Invalid map_on_demand (%d), expects 1 - %d. Using default of %d\n",
+		      tunables->lnd_map_on_demand,
+		      IBLND_MAX_RDMA_FRAGS, IBLND_DEFAULT_MAP_ON_DEMAND);
+		tunables->lnd_map_on_demand = IBLND_DEFAULT_MAP_ON_DEMAND;
 	}
 
 	if (tunables->lnd_map_on_demand == 1) {

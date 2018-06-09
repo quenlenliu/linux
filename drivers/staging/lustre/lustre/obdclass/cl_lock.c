@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -37,11 +38,11 @@
 
 #define DEBUG_SUBSYSTEM S_CLASS
 
-#include "../include/obd_class.h"
-#include "../include/obd_support.h"
-#include "../include/lustre_fid.h"
+#include <obd_class.h>
+#include <obd_support.h>
+#include <lustre_fid.h>
 #include <linux/list.h>
-#include "../include/cl_object.h"
+#include <cl_object.h>
 #include "cl_internal.h"
 
 static void cl_lock_trace0(int level, const struct lu_env *env,
@@ -78,13 +79,12 @@ EXPORT_SYMBOL(cl_lock_slice_add);
 
 void cl_lock_fini(const struct lu_env *env, struct cl_lock *lock)
 {
+	struct cl_lock_slice *slice;
 	cl_lock_trace(D_DLMTRACE, env, "destroy lock", lock);
 
-	while (!list_empty(&lock->cll_layers)) {
-		struct cl_lock_slice *slice;
-
-		slice = list_entry(lock->cll_layers.next,
-				   struct cl_lock_slice, cls_linkage);
+	while ((slice = list_first_entry_or_null(&lock->cll_layers,
+						 struct cl_lock_slice,
+						 cls_linkage)) != NULL) {
 		list_del_init(lock->cll_layers.next);
 		slice->cls_ops->clo_fini(env, slice);
 	}
@@ -224,7 +224,7 @@ EXPORT_SYMBOL(cl_lock_release);
 
 const char *cl_lock_mode_name(const enum cl_lock_mode mode)
 {
-	static const char *names[] = {
+	static const char * const names[] = {
 		[CLM_READ]    = "R",
 		[CLM_WRITE]   = "W",
 		[CLM_GROUP]   = "G"
@@ -246,7 +246,7 @@ void cl_lock_descr_print(const struct lu_env *env, void *cookie,
 	const struct lu_fid  *fid;
 
 	fid = lu_object_fid(&descr->cld_obj->co_lu);
-	(*printer)(env, cookie, DDESCR"@"DFID, PDESCR(descr), PFID(fid));
+	(*printer)(env, cookie, DDESCR "@" DFID, PDESCR(descr), PFID(fid));
 }
 EXPORT_SYMBOL(cl_lock_descr_print);
 

@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * This file is based on code from OCTEON SDK by Cavium Networks.
  *
  * Copyright (c) 2003-2010 Cavium Networks
- *
- * This file is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License, Version 2, as
- * published by the Free Software Foundation.
  */
 
 /*
@@ -38,9 +35,6 @@ struct octeon_ethernet {
 	int imode;
 	/* List of outstanding tx buffers per queue */
 	struct sk_buff_head tx_free_list[16];
-	/* Device statistics */
-	struct net_device_stats stats;
-	struct phy_device *phydev;
 	unsigned int last_speed;
 	unsigned int last_link;
 	/* Last negotiated link state */
@@ -73,7 +67,7 @@ void cvm_oct_link_poll(struct net_device *dev);
 
 extern int always_use_pow;
 extern int pow_send_group;
-extern int pow_receive_group;
+extern int pow_receive_groups;
 extern char pow_send_list[];
 extern struct net_device *cvm_oct_device[];
 extern atomic_t cvm_oct_poll_queue_stopping;

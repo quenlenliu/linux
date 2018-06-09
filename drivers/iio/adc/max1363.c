@@ -1007,7 +1007,7 @@ static struct attribute *max1363_event_attributes[] = {
 	NULL,
 };
 
-static struct attribute_group max1363_event_attribute_group = {
+static const struct attribute_group max1363_event_attribute_group = {
 	.attrs = max1363_event_attributes,
 };
 
@@ -1029,7 +1029,6 @@ static int max1363_update_scan_mode(struct iio_dev *indio_dev,
 
 static const struct iio_info max1238_info = {
 	.read_raw = &max1363_read_raw,
-	.driver_module = THIS_MODULE,
 	.update_scan_mode = &max1363_update_scan_mode,
 };
 
@@ -1040,7 +1039,6 @@ static const struct iio_info max1363_info = {
 	.write_event_config = &max1363_write_event_config,
 	.read_raw = &max1363_read_raw,
 	.update_scan_mode = &max1363_update_scan_mode,
-	.driver_module = THIS_MODULE,
 	.event_attrs = &max1363_event_attribute_group,
 };
 
@@ -1567,6 +1565,7 @@ static const struct of_device_id max1363_of_match[] = {
 	MAX1363_COMPATIBLE("maxim,max11647", max11647),
 	{ /* sentinel */ }
 };
+MODULE_DEVICE_TABLE(of, max1363_of_match);
 #endif
 
 static int max1363_probe(struct i2c_client *client,

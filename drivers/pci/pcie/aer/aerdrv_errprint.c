@@ -1,16 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- * drivers/pci/pcie/aer/aerdrv_errprint.c
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
- *
  * Format error messages and print them to console.
  *
  * Copyright (C) 2006 Intel Corp.
  *	Tom Long Nguyen (tom.l.nguyen@intel.com)
  *	Zhang Yanmin (yanmin.zhang@intel.com)
- *
  */
 
 #include <linux/module.h>
@@ -132,7 +126,7 @@ static const char *aer_agent_string[] = {
 static void __print_tlp_header(struct pci_dev *dev,
 			       struct aer_header_log_regs *t)
 {
-	dev_err(&dev->dev, "  TLP Header: %08x %08x %08x %08x\n",
+	pci_err(dev, "  TLP Header: %08x %08x %08x %08x\n",
 		t->dw0, t->dw1, t->dw2, t->dw3);
 }
 
@@ -155,10 +149,10 @@ static void __aer_print_error(struct pci_dev *dev,
 				aer_uncorrectable_error_string[i] : NULL;
 
 		if (errmsg)
-			dev_err(&dev->dev, "   [%2d] %-22s%s\n", i, errmsg,
+			pci_err(dev, "   [%2d] %-22s%s\n", i, errmsg,
 				info->first_error == i ? " (First)" : "");
 		else
-			dev_err(&dev->dev, "   [%2d] Unknown Error Bit%s\n",
+			pci_err(dev, "   [%2d] Unknown Error Bit%s\n",
 				i, info->first_error == i ? " (First)" : "");
 	}
 }
@@ -169,19 +163,19 @@ void aer_print_error(struct pci_dev *dev, struct aer_err_info *info)
 	int id = ((dev->bus->number << 8) | dev->devfn);
 
 	if (!info->status) {
-		dev_err(&dev->dev, "PCIe Bus Error: severity=%s, type=Unaccessible, id=%04x(Unregistered Agent ID)\n",
-			aer_error_severity_string[info->severity], id);
+		pci_err(dev, "PCIe Bus Error: severity=%s, type=Inaccessible, (Unregistered Agent ID)\n",
+			aer_error_severity_string[info->severity]);
 		goto out;
 	}
 
 	layer = AER_GET_LAYER_ERROR(info->severity, info->status);
 	agent = AER_GET_AGENT(info->severity, info->status);
 
-	dev_err(&dev->dev, "PCIe Bus Error: severity=%s, type=%s, id=%04x(%s)\n",
+	pci_err(dev, "PCIe Bus Error: severity=%s, type=%s, (%s)\n",
 		aer_error_severity_string[info->severity],
-		aer_error_layer[layer], id, aer_agent_string[agent]);
+		aer_error_layer[layer], aer_agent_string[agent]);
 
-	dev_err(&dev->dev, "  device [%04x:%04x] error status/mask=%08x/%08x\n",
+	pci_err(dev, "  device [%04x:%04x] error status/mask=%08x/%08x\n",
 		dev->vendor, dev->device,
 		info->status, info->mask);
 
@@ -192,17 +186,21 @@ void aer_print_error(struct pci_dev *dev, struct aer_err_info *info)
 
 out:
 	if (info->id && info->error_dev_num > 1 && info->id == id)
-		dev_err(&dev->dev, "  Error of this Agent(%04x) is reported first\n", id);
+		pci_err(dev, "  Error of this Agent is reported first\n");
 
 	trace_aer_event(dev_name(&dev->dev), (info->status & ~info->mask),
-			info->severity);
+			info->severity, info->tlp_header_valid, &info->tlp);
 }
 
 void aer_print_port_info(struct pci_dev *dev, struct aer_err_info *info)
 {
-	dev_info(&dev->dev, "AER: %s%s error received: id=%04x\n",
+	u8 bus = info->id >> 8;
+	u8 devfn = info->id & 0xff;
+
+	pci_info(dev, "AER: %s%s error received: %04x:%02x:%02x.%d\n",
 		info->multi_error_valid ? "Multiple " : "",
-		aer_error_severity_string[info->severity], info->id);
+		aer_error_severity_string[info->severity],
+		pci_domain_nr(dev->bus), bus, PCI_SLOT(devfn), PCI_FUNC(devfn));
 }
 
 #ifdef CONFIG_ACPI_APEI_PCIEAER
@@ -219,44 +217,44 @@ int cper_severity_to_aer(int cper_severity)
 }
 EXPORT_SYMBOL_GPL(cper_severity_to_aer);
 
-void cper_print_aer(struct pci_dev *dev, int cper_severity,
+void cper_print_aer(struct pci_dev *dev, int aer_severity,
 		    struct aer_capability_regs *aer)
 {
-	int aer_severity, layer, agent, status_strs_size, tlp_header_valid = 0;
+	int layer, agent, tlp_header_valid = 0;
 	u32 status, mask;
-	const char **status_strs;
-
-	aer_severity = cper_severity_to_aer(cper_severity);
+	struct aer_err_info info;
 
 	if (aer_severity == AER_CORRECTABLE) {
 		status = aer->cor_status;
 		mask = aer->cor_mask;
-		status_strs = aer_correctable_error_string;
-		status_strs_size = ARRAY_SIZE(aer_correctable_error_string);
 	} else {
 		status = aer->uncor_status;
 		mask = aer->uncor_mask;
-		status_strs = aer_uncorrectable_error_string;
-		status_strs_size = ARRAY_SIZE(aer_uncorrectable_error_string);
 		tlp_header_valid = status & AER_LOG_TLP_MASKS;
 	}
 
 	layer = AER_GET_LAYER_ERROR(aer_severity, status);
 	agent = AER_GET_AGENT(aer_severity, status);
 
-	dev_err(&dev->dev, "aer_status: 0x%08x, aer_mask: 0x%08x\n", status, mask);
-	cper_print_bits("", status, status_strs, status_strs_size);
-	dev_err(&dev->dev, "aer_layer=%s, aer_agent=%s\n",
+	memset(&info, 0, sizeof(info));
+	info.severity = aer_severity;
+	info.status = status;
+	info.mask = mask;
+	info.first_error = PCI_ERR_CAP_FEP(aer->cap_control);
+
+	pci_err(dev, "aer_status: 0x%08x, aer_mask: 0x%08x\n", status, mask);
+	__aer_print_error(dev, &info);
+	pci_err(dev, "aer_layer=%s, aer_agent=%s\n",
 		aer_error_layer[layer], aer_agent_string[agent]);
 
 	if (aer_severity != AER_CORRECTABLE)
-		dev_err(&dev->dev, "aer_uncor_severity: 0x%08x\n",
+		pci_err(dev, "aer_uncor_severity: 0x%08x\n",
 			aer->uncor_severity);
 
 	if (tlp_header_valid)
 		__print_tlp_header(dev, &aer->header_log);
 
 	trace_aer_event(dev_name(&dev->dev), (status & ~mask),
-			aer_severity);
+			aer_severity, tlp_header_valid, &aer->header_log);
 }
 #endif

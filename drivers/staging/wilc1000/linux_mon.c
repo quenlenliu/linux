@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*!
  *  @file	linux_mon.c
  *  @brief	File Operations OS wrapper functionality
@@ -39,9 +40,6 @@ static u8 broadcast[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
 #define IEEE80211_RADIOTAP_F_TX_RTS	0x0004  /* used rts/cts handshake */
 #define IEEE80211_RADIOTAP_F_TX_FAIL	0x0001  /* failed due to excessive*/
-#define IS_MANAGMEMENT				0x100
-#define IS_MANAGMEMENT_CALLBACK			0x080
-#define IS_MGMT_STATUS_SUCCES			0x040
 #define GET_PKT_OFFSET(a) (((a) >> 22) & 0x1ff)
 
 void WILC_WFI_monitor_rx(u8 *buff, u32 size)
@@ -72,9 +70,9 @@ void WILC_WFI_monitor_rx(u8 *buff, u32 size)
 		if (!skb)
 			return;
 
-		memcpy(skb_put(skb, size), buff, size);
+		skb_put_data(skb, buff, size);
 
-		cb_hdr = (struct wilc_wfi_radiotap_cb_hdr *)skb_push(skb, sizeof(*cb_hdr));
+		cb_hdr = skb_push(skb, sizeof(*cb_hdr));
 		memset(cb_hdr, 0, sizeof(struct wilc_wfi_radiotap_cb_hdr));
 
 		cb_hdr->hdr.it_version = 0; /* PKTHDR_RADIOTAP_VERSION; */
@@ -100,8 +98,8 @@ void WILC_WFI_monitor_rx(u8 *buff, u32 size)
 		if (!skb)
 			return;
 
-		memcpy(skb_put(skb, size), buff, size);
-		hdr = (struct wilc_wfi_radiotap_hdr *)skb_push(skb, sizeof(*hdr));
+		skb_put_data(skb, buff, size);
+		hdr = skb_push(skb, sizeof(*hdr));
 		memset(hdr, 0, sizeof(struct wilc_wfi_radiotap_hdr));
 		hdr->hdr.it_version = 0; /* PKTHDR_RADIOTAP_VERSION; */
 		hdr->hdr.it_len = cpu_to_le16(sizeof(struct wilc_wfi_radiotap_hdr));
@@ -111,7 +109,7 @@ void WILC_WFI_monitor_rx(u8 *buff, u32 size)
 	}
 
 	skb->dev = wilc_wfi_mon;
-	skb_set_mac_header(skb, 0);
+	skb_reset_mac_header(skb);
 	skb->ip_summed = CHECKSUM_UNNECESSARY;
 	skb->pkt_type = PACKET_OTHERHOST;
 	skb->protocol = htons(ETH_P_802_2);
@@ -149,7 +147,7 @@ static int mon_mgmt_tx(struct net_device *dev, const u8 *buf, size_t len)
 	if (!mgmt_tx)
 		return -ENOMEM;
 
-	mgmt_tx->buff = kmalloc(len, GFP_ATOMIC);
+	mgmt_tx->buff = kmemdup(buf, len, GFP_ATOMIC);
 	if (!mgmt_tx->buff) {
 		kfree(mgmt_tx);
 		return -ENOMEM;
@@ -157,7 +155,6 @@ static int mon_mgmt_tx(struct net_device *dev, const u8 *buf, size_t len)
 
 	mgmt_tx->size = len;
 
-	memcpy(mgmt_tx->buff, buf, len);
 	wilc_wlan_txq_add_mgmt_pkt(dev, mgmt_tx, mgmt_tx->buff, mgmt_tx->size,
 				   mgmt_tx_complete);
 
@@ -197,10 +194,12 @@ static netdev_tx_t WILC_WFI_mon_xmit(struct sk_buff *skb,
 
 	if (skb->data[0] == 0xc0 && (!(memcmp(broadcast, &skb->data[4], 6)))) {
 		skb2 = dev_alloc_skb(skb->len + sizeof(struct wilc_wfi_radiotap_cb_hdr));
+		if (!skb2)
+			return -ENOMEM;
 
-		memcpy(skb_put(skb2, skb->len), skb->data, skb->len);
+		skb_put_data(skb2, skb->data, skb->len);
 
-		cb_hdr = (struct wilc_wfi_radiotap_cb_hdr *)skb_push(skb2, sizeof(*cb_hdr));
+		cb_hdr = skb_push(skb2, sizeof(*cb_hdr));
 		memset(cb_hdr, 0, sizeof(struct wilc_wfi_radiotap_cb_hdr));
 
 		cb_hdr->hdr.it_version = 0; /* PKTHDR_RADIOTAP_VERSION; */
@@ -215,7 +214,7 @@ static netdev_tx_t WILC_WFI_mon_xmit(struct sk_buff *skb,
 		cb_hdr->tx_flags = 0x0004;
 
 		skb2->dev = wilc_wfi_mon;
-		skb_set_mac_header(skb2, 0);
+		skb_reset_mac_header(skb2);
 		skb2->ip_summed = CHECKSUM_UNNECESSARY;
 		skb2->pkt_type = PACKET_OTHERHOST;
 		skb2->protocol = htons(ETH_P_802_2);
@@ -253,7 +252,7 @@ static const struct net_device_ops wilc_wfi_netdev_ops = {
  *  @brief      WILC_WFI_init_mon_interface
  *  @details
  *  @param[in]
- *  @return     int : Return 0 on Success
+ *  @return     Pointer to net_device
  *  @author	mdaftedar
  *  @date	12 JUL 2012
  *  @version	1.0
@@ -261,7 +260,6 @@ static const struct net_device_ops wilc_wfi_netdev_ops = {
 struct net_device *WILC_WFI_init_mon_interface(const char *name,
 					       struct net_device *real_dev)
 {
-	u32 ret = 0;
 	struct WILC_WFI_mon_priv *priv;
 
 	/*If monitor interface is already initialized, return it*/
@@ -276,8 +274,7 @@ struct net_device *WILC_WFI_init_mon_interface(const char *name,
 	wilc_wfi_mon->name[IFNAMSIZ - 1] = 0;
 	wilc_wfi_mon->netdev_ops = &wilc_wfi_netdev_ops;
 
-	ret = register_netdevice(wilc_wfi_mon);
-	if (ret) {
+	if (register_netdevice(wilc_wfi_mon)) {
 		netdev_err(real_dev, "register_netdevice failed\n");
 		return NULL;
 	}

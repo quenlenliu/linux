@@ -93,6 +93,16 @@ struct v4l2_ctrl_type_ops {
 			union v4l2_ctrl_ptr ptr);
 };
 
+/**
+ * typedef v4l2_ctrl_notify_fnc - typedef for a notify argument with a function
+ *	that should be called when a control value has changed.
+ *
+ * @ctrl: pointer to struct &v4l2_ctrl
+ * @priv: control private data
+ *
+ * This typedef definition is used as an argument to v4l2_ctrl_notify()
+ * and as an argument at struct &v4l2_ctrl_handler.
+ */
 typedef void (*v4l2_ctrl_notify_fnc)(struct v4l2_ctrl *ctrl, void *priv);
 
 /**
@@ -156,18 +166,25 @@ typedef void (*v4l2_ctrl_notify_fnc)(struct v4l2_ctrl *ctrl, void *priv);
  *		empty strings ("") correspond to non-existing menu items (this
  *		is in addition to the menu_skip_mask above). The last entry
  *		must be NULL.
+ *		Used only if the @type is %V4L2_CTRL_TYPE_MENU.
+ * @qmenu_int:	A 64-bit integer array for with integer menu items.
+ *		The size of array must be equal to the menu size, e. g.:
+ *		:math:`ceil(\frac{maximum - minimum}{step}) + 1`.
+ *		Used only if the @type is %V4L2_CTRL_TYPE_INTEGER_MENU.
  * @flags:	The control's flags.
- * @cur:	The control's current value.
+ * @cur:	Structure to store the current value.
+ * @cur.val:	The control's current value, if the @type is represented via
+ *		a u32 integer (see &enum v4l2_ctrl_type).
  * @val:	The control's new s32 value.
  * @priv:	The control's private pointer. For use by the driver. It is
  *		untouched by the control framework. Note that this pointer is
  *		not freed when the control is deleted. Should this be needed
  *		then a new internal bitfield can be added to tell the framework
  *		to free this pointer.
- * @p_cur:	The control's current value represented via an union with
+ * @p_cur:	The control's current value represented via a union with
  *		provides a standard way of accessing control types
  *		through a pointer.
- * @p_new:	The control's new value represented via an union with provides
+ * @p_new:	The control's new value represented via a union with provides
  *		a standard way of accessing control types
  *		through a pointer.
  */
@@ -229,7 +246,7 @@ struct v4l2_ctrl {
  * @next:	Single-link list node for the hash.
  * @ctrl:	The actual control information.
  * @helper:	Pointer to helper struct. Used internally in
- *		prepare_ext_ctrls().
+ *		``prepare_ext_ctrls`` function at ``v4l2-ctrl.c``.
  *
  * Each control handler has a list of these refs. The list_head is used to
  * keep a sorted-by-control-ID list of all controls, while the next pointer
@@ -330,17 +347,17 @@ struct v4l2_ctrl_config {
  * v4l2_ctrl_fill - Fill in the control fields based on the control ID.
  *
  * @id: ID of the control
- * @name: name of the control
- * @type: type of the control
- * @min: minimum value for the control
- * @max: maximum value for the control
- * @step: control step
- * @def: default value for the control
- * @flags: flags to be used on the control
+ * @name: pointer to be filled with a string with the name of the control
+ * @type: pointer for storing the type of the control
+ * @min: pointer for storing the minimum value for the control
+ * @max: pointer for storing the maximum value for the control
+ * @step: pointer for storing the control step
+ * @def: pointer for storing the default value for the control
+ * @flags: pointer for storing the flags to be used on the control
  *
  * This works for all standard V4L2 controls.
  * For non-standard controls it will only fill in the given arguments
- * and @name will be %NULL.
+ * and @name content will be set to %NULL.
  *
  * This function will overwrite the contents of @name, @type and @flags.
  * The contents of @min, @max, @step and @def may be modified depending on
@@ -369,17 +386,39 @@ void v4l2_ctrl_fill(u32 id, const char **name, enum v4l2_ctrl_type *type,
  * @key:	Used by the lock validator if CONFIG_LOCKDEP is set.
  * @name:	Used by the lock validator if CONFIG_LOCKDEP is set.
  *
- * Returns an error if the buckets could not be allocated. This error will
- * also be stored in @hdl->error.
+ * .. attention::
  *
- * Never use this call directly, always use the v4l2_ctrl_handler_init
- * macro that hides the @key and @name arguments.
+ *    Never use this call directly, always use the v4l2_ctrl_handler_init()
+ *    macro that hides the @key and @name arguments.
+ *
+ * Return: returns an error if the buckets could not be allocated. This
+ * error will also be stored in @hdl->error.
  */
 int v4l2_ctrl_handler_init_class(struct v4l2_ctrl_handler *hdl,
 				 unsigned int nr_of_controls_hint,
 				 struct lock_class_key *key, const char *name);
 
 #ifdef CONFIG_LOCKDEP
+
+/**
+ * v4l2_ctrl_handler_init - helper function to create a static struct
+ *	 &lock_class_key and calls v4l2_ctrl_handler_init_class()
+ *
+ * @hdl:	The control handler.
+ * @nr_of_controls_hint: A hint of how many controls this handler is
+ *		expected to refer to. This is the total number, so including
+ *		any inherited controls. It doesn't have to be precise, but if
+ *		it is way off, then you either waste memory (too many buckets
+ *		are allocated) or the control lookup becomes slower (not enough
+ *		buckets are allocated, so there are more slow list lookups).
+ *		It will always work, though.
+ *
+ * This helper function creates a static struct &lock_class_key and
+ * calls v4l2_ctrl_handler_init_class(), providing a proper name for the lock
+ * validador.
+ *
+ * Use this helper function to initialize a control handler.
+ */
 #define v4l2_ctrl_handler_init(hdl, nr_of_controls_hint)		\
 (									\
 	({								\
@@ -424,6 +463,19 @@ static inline void v4l2_ctrl_unlock(struct v4l2_ctrl *ctrl)
 {
 	mutex_unlock(ctrl->handler->lock);
 }
+
+/**
+ * __v4l2_ctrl_handler_setup() - Call the s_ctrl op for all controls belonging
+ * to the handler to initialize the hardware to the current control values. The
+ * caller is responsible for acquiring the control handler mutex on behalf of
+ * __v4l2_ctrl_handler_setup().
+ * @hdl:	The control handler.
+ *
+ * Button controls will be skipped, as are read-only controls.
+ *
+ * If @hdl == NULL, then this just returns 0.
+ */
+int __v4l2_ctrl_handler_setup(struct v4l2_ctrl_handler *hdl);
 
 /**
  * v4l2_ctrl_handler_setup() - Call the s_ctrl op for all controls belonging
@@ -564,6 +616,13 @@ struct v4l2_ctrl *v4l2_ctrl_new_int_menu(struct v4l2_ctrl_handler *hdl,
 					 u32 id, u8 max, u8 def,
 					 const s64 *qmenu_int);
 
+/**
+ * typedef v4l2_ctrl_filter - Typedef to define the filter function to be
+ *	used when adding a control handler.
+ *
+ * @ctrl: pointer to struct &v4l2_ctrl.
+ */
+
 typedef bool (*v4l2_ctrl_filter)(const struct v4l2_ctrl *ctrl);
 
 /**
@@ -635,8 +694,8 @@ void v4l2_ctrl_cluster(unsigned int ncontrols, struct v4l2_ctrl **controls);
  * be marked active, and any reads will just return the current value without
  * going through g_volatile_ctrl.
  *
- * In addition, this function will set the V4L2_CTRL_FLAG_UPDATE flag
- * on the autofoo control and V4L2_CTRL_FLAG_INACTIVE on the foo control(s)
+ * In addition, this function will set the %V4L2_CTRL_FLAG_UPDATE flag
+ * on the autofoo control and %V4L2_CTRL_FLAG_INACTIVE on the foo control(s)
  * if autofoo is in auto mode.
  */
 void v4l2_ctrl_auto_cluster(unsigned int ncontrols,
@@ -686,7 +745,6 @@ void v4l2_ctrl_activate(struct v4l2_ctrl *ctrl, bool active);
  */
 void v4l2_ctrl_grab(struct v4l2_ctrl *ctrl, bool grabbed);
 
-
 /**
  *__v4l2_ctrl_modify_range() - Unlocked variant of v4l2_ctrl_modify_range()
  *
@@ -703,8 +761,8 @@ void v4l2_ctrl_grab(struct v4l2_ctrl *ctrl, bool grabbed);
  * An error is returned if one of the range arguments is invalid for this
  * control type.
  *
- * This function assumes that the control handler is not locked and will
- * take the lock itself.
+ * The caller is responsible for acquiring the control handler mutex on behalf
+ * of __v4l2_ctrl_modify_range().
  */
 int __v4l2_ctrl_modify_range(struct v4l2_ctrl *ctrl,
 			     s64 min, s64 max, u64 step, s64 def);
@@ -936,9 +994,9 @@ extern const struct v4l2_subscribed_event_ops v4l2_ctrl_sub_ev_ops;
  * v4l2_ctrl_replace - Function to be used as a callback to
  *	&struct v4l2_subscribed_event_ops replace\(\)
  *
- * @old: pointer to :ref:`struct v4l2_event <v4l2-event>` with the reported
+ * @old: pointer to struct &v4l2_event with the reported
  *	 event;
- * @new: pointer to :ref:`struct v4l2_event <v4l2-event>` with the modified
+ * @new: pointer to struct &v4l2_event with the modified
  *	 event;
  */
 void v4l2_ctrl_replace(struct v4l2_event *old, const struct v4l2_event *new);
@@ -947,9 +1005,9 @@ void v4l2_ctrl_replace(struct v4l2_event *old, const struct v4l2_event *new);
  * v4l2_ctrl_merge - Function to be used as a callback to
  *	&struct v4l2_subscribed_event_ops merge(\)
  *
- * @old: pointer to :ref:`struct v4l2_event <v4l2-event>` with the reported
+ * @old: pointer to struct &v4l2_event with the reported
  *	 event;
- * @new: pointer to :ref:`struct v4l2_event <v4l2-event>` with the merged
+ * @new: pointer to struct &v4l2_event with the merged
  *	 event;
  */
 void v4l2_ctrl_merge(const struct v4l2_event *old, struct v4l2_event *new);
@@ -986,7 +1044,7 @@ int v4l2_ctrl_subscribe_event(struct v4l2_fh *fh,
  * @file: pointer to struct file
  * @wait: pointer to struct poll_table_struct
  */
-unsigned int v4l2_ctrl_poll(struct file *file, struct poll_table_struct *wait);
+__poll_t v4l2_ctrl_poll(struct file *file, struct poll_table_struct *wait);
 
 /* Helpers for ioctl_ops */
 
@@ -1088,7 +1146,7 @@ int v4l2_s_ext_ctrls(struct v4l2_fh *fh, struct v4l2_ctrl_handler *hdl,
 
 /**
  * v4l2_ctrl_subdev_subscribe_event - Helper function to implement
- * 	as a &struct v4l2_subdev_core_ops subscribe_event function
+ *	as a &struct v4l2_subdev_core_ops subscribe_event function
  *	that just subscribes control events.
  *
  * @sd: pointer to &struct v4l2_subdev

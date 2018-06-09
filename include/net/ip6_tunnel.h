@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _NET_IP6_TUNNEL_H
 #define _NET_IP6_TUNNEL_H
 
@@ -23,6 +24,7 @@ struct __ip6_tnl_parm {
 	__u8 proto;		/* tunnel protocol */
 	__u8 encap_limit;	/* encapsulation limit for tunnel */
 	__u8 hop_limit;		/* hop limit for tunnel */
+	bool collect_md;
 	__be32 flowinfo;	/* traffic class and flowlabel for tunnel */
 	__u32 flags;		/* tunnel flags */
 	struct in6_addr laddr;	/* local tunnel end-point address */
@@ -32,6 +34,12 @@ struct __ip6_tnl_parm {
 	__be16			o_flags;
 	__be32			i_key;
 	__be32			o_key;
+
+	__u32			fwmark;
+	__u32			index;	/* ERSPAN type II index */
+	__u8			erspan_ver;	/* ERSPAN version */
+	__u8			dir;	/* direction */
+	__u16			hwid;	/* hwid */
 };
 
 /* IPv6 tunnel */
@@ -145,6 +153,7 @@ static inline void ip6tunnel_xmit(struct sock *sk, struct sk_buff *skb,
 {
 	int pkt_len, err;
 
+	memset(skb->cb, 0, sizeof(struct inet6_skb_parm));
 	pkt_len = skb->len - skb_inner_network_offset(skb);
 	err = ip6_local_out(dev_net(skb_dst(skb)->dev), sk, skb);
 	if (unlikely(net_xmit_eval(err)))

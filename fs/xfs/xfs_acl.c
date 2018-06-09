@@ -170,8 +170,8 @@ xfs_get_acl(struct inode *inode, int type)
 	return acl;
 }
 
-STATIC int
-__xfs_set_acl(struct inode *inode, int type, struct posix_acl *acl)
+int
+__xfs_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 {
 	struct xfs_inode *ip = XFS_I(inode);
 	unsigned char *ea_name;
@@ -236,7 +236,7 @@ xfs_set_mode(struct inode *inode, umode_t mode)
 
 		iattr.ia_valid = ATTR_MODE | ATTR_CTIME;
 		iattr.ia_mode = mode;
-		iattr.ia_ctime = current_fs_time(inode->i_sb);
+		iattr.ia_ctime = current_time(inode);
 
 		error = xfs_setattr_nonsize(XFS_I(inode), &iattr, XFS_ATTR_NOACL);
 	}
@@ -247,6 +247,8 @@ xfs_set_mode(struct inode *inode, umode_t mode)
 int
 xfs_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 {
+	umode_t mode;
+	bool set_mode = false;
 	int error = 0;
 
 	if (!acl)
@@ -257,21 +259,24 @@ xfs_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 		return error;
 
 	if (type == ACL_TYPE_ACCESS) {
-		umode_t mode = inode->i_mode;
-		error = posix_acl_equiv_mode(acl, &mode);
-
-		if (error <= 0) {
-			acl = NULL;
-
-			if (error < 0)
-				return error;
-		}
-
-		error = xfs_set_mode(inode, mode);
+		error = posix_acl_update_mode(inode, &mode, &acl);
 		if (error)
 			return error;
+		set_mode = true;
 	}
 
  set_acl:
-	return __xfs_set_acl(inode, type, acl);
+	error =  __xfs_set_acl(inode, acl, type);
+	if (error)
+		return error;
+
+	/*
+	 * We set the mode after successfully updating the ACL xattr because the
+	 * xattr update can fail at ENOSPC and we don't want to change the mode
+	 * if the ACL update hasn't been applied.
+	 */
+	if (set_mode)
+		error = xfs_set_mode(inode, mode);
+
+	return error;
 }

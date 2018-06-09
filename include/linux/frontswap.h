@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_FRONTSWAP_H
 #define _LINUX_FRONTSWAP_H
 
@@ -106,8 +107,9 @@ static inline void frontswap_invalidate_area(unsigned type)
 
 static inline void frontswap_init(unsigned type, unsigned long *map)
 {
-	if (frontswap_enabled())
-		__frontswap_init(type, map);
+#ifdef CONFIG_FRONTSWAP
+	__frontswap_init(type, map);
+#endif
 }
 
 #endif /* _LINUX_FRONTSWAP_H */

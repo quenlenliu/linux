@@ -47,7 +47,7 @@ static int r871xu_drv_init(struct usb_interface *pusb_intf,
 
 static void r871xu_dev_remove(struct usb_interface *pusb_intf);
 
-static struct usb_device_id rtl871x_usb_id_tbl[] = {
+static const struct usb_device_id rtl871x_usb_id_tbl[] = {
 
 /* RTL8188SU */
 	/* Realtek */
@@ -301,7 +301,8 @@ void rtl871x_intf_stop(struct _adapter *padapter)
 	/*disable_hw_interrupt*/
 	if (!padapter->bSurpriseRemoved) {
 		/*device still exists, so driver can do i/o operation
-		 * TODO: */
+		 * TODO:
+		 */
 	}
 
 	/* cancel in irp */
@@ -368,7 +369,7 @@ static const struct device_type wlan_type = {
  *
  * notes: drv_init() is called when the bus driver has located a card for us
  * to support. We accept the new device by returning 0.
-*/
+ */
 static int r871xu_drv_init(struct usb_interface *pusb_intf,
 			   const struct usb_device_id *pdid)
 {
@@ -589,9 +590,10 @@ static int r871xu_drv_init(struct usb_interface *pusb_intf,
 			mac[0] &= 0xFE;
 			dev_info(&udev->dev,
 				"r8712u: MAC Address from user = %pM\n", mac);
-		} else
+		} else {
 			dev_info(&udev->dev,
 				"r8712u: MAC Address from efuse = %pM\n", mac);
+		}
 		ether_addr_copy(pnetdev->dev_addr, mac);
 	}
 	/* step 6. Load the firmware asynchronously */
@@ -611,7 +613,8 @@ error:
 }
 
 /* rmmod module & unplug(SurpriseRemoved) will call r871xu_dev_remove()
- * => how to recognize both */
+ * => how to recognize both
+ */
 static void r871xu_dev_remove(struct usb_interface *pusb_intf)
 {
 	struct net_device *pnetdev = usb_get_intfdata(pusb_intf);
@@ -635,12 +638,14 @@ static void r871xu_dev_remove(struct usb_interface *pusb_intf)
 		r8712_free_drv_sw(padapter);
 
 		/* decrease the reference count of the usb device structure
-		 * when disconnect */
+		 * when disconnect
+		 */
 		usb_put_dev(udev);
 	}
 	/* If we didn't unplug usb dongle and remove/insert module, driver
 	 * fails on sitesurvey for the first time when device is up.
-	 * Reset usb port for sitesurvey fail issue. */
+	 * Reset usb port for sitesurvey fail issue.
+	 */
 	if (udev->state != USB_STATE_NOTATTACHED)
 		usb_reset_device(udev);
 }

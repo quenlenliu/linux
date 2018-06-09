@@ -11,40 +11,23 @@ Name
 
 FE_READ_SIGNAL_STRENGTH
 
+.. attention:: This ioctl is deprecated.
 
 Synopsis
 ========
 
-.. cpp:function:: int ioctl( int fd, int request = FE_READ_SIGNAL_STRENGTH, uint16_t *strength)
+.. c:function:: int ioctl( int fd, FE_READ_SIGNAL_STRENGTH, uint16_t *strength)
+    :name: FE_READ_SIGNAL_STRENGTH
 
 
 Arguments
 =========
 
-.. flat-table::
-    :header-rows:  0
-    :stub-columns: 0
+``fd``
+    File descriptor returned by :c:func:`open() <dvb-fe-open>`.
 
-
-    -  .. row 1
-
-       -  int fd
-
-       -  File descriptor returned by a previous call to open().
-
-    -  .. row 2
-
-       -  int request
-
-       -  Equals
-	  :ref:`FE_READ_SIGNAL_STRENGTH`
-	  for this command.
-
-    -  .. row 3
-
-       -  uint16_t \*strength
-
-       -  The signal strength value is stored into \*strength.
+``strength``
+    The signal strength value is stored into \*strength.
 
 
 Description
@@ -58,6 +41,10 @@ to the device is sufficient.
 Return Value
 ============
 
-On success 0 is returned, on error -1 and the ``errno`` variable is set
-appropriately. The generic error codes are described at the
+On success 0 is returned.
+
+On error -1 is returned, and the ``errno`` variable is set
+appropriately.
+
+Generic error codes are described at the
 :ref:`Generic Error Codes <gen-errors>` chapter.

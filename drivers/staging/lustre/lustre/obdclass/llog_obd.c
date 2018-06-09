@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -32,8 +33,8 @@
 
 #define DEBUG_SUBSYSTEM S_LOG
 
-#include "../include/obd_class.h"
-#include "../include/lustre_log.h"
+#include <obd_class.h>
+#include <lustre_log.h>
 #include "llog_internal.h"
 
 /* helper functions for calling the llog obd methods */
@@ -103,7 +104,6 @@ EXPORT_SYMBOL(__llog_ctxt_put);
 
 int llog_cleanup(const struct lu_env *env, struct llog_ctxt *ctxt)
 {
-	struct l_wait_info lwi = LWI_INTR(LWI_ON_SIGNAL_NOOP, NULL);
 	struct obd_llog_group *olg;
 	int rc, idx;
 
@@ -128,8 +128,8 @@ int llog_cleanup(const struct lu_env *env, struct llog_ctxt *ctxt)
 		CERROR("Error %d while cleaning up ctxt %p\n",
 		       rc, ctxt);
 
-	l_wait_event(olg->olg_waitq,
-		     llog_group_ctxt_null(olg, idx), &lwi);
+	l_wait_event_abortable(olg->olg_waitq,
+			     llog_group_ctxt_null(olg, idx));
 
 	return rc;
 }
@@ -158,6 +158,7 @@ int llog_setup(const struct lu_env *env, struct obd_device *obd,
 	mutex_init(&ctxt->loc_mutex);
 	ctxt->loc_exp = class_export_get(disk_obd->obd_self_export);
 	ctxt->loc_flags = LLOG_CTXT_FLAG_UNINITIALIZED;
+	ctxt->loc_chunk_size = LLOG_MIN_CHUNK_SIZE;
 
 	rc = llog_group_set_ctxt(olg, ctxt, index);
 	if (rc) {
@@ -210,7 +211,6 @@ LU_KEY_INIT_FINI(llog, struct llog_thread_info);
 /* context key: llog_thread_key */
 LU_CONTEXT_KEY_DEFINE(llog, LCT_MD_THREAD | LCT_MG_THREAD | LCT_LOCAL);
 LU_KEY_INIT_GENERIC(llog);
-EXPORT_SYMBOL(llog_thread_key);
 
 int llog_info_init(void)
 {

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _UAPI_ASM_PARISC_UNISTD_H_
 #define _UAPI_ASM_PARISC_UNISTD_H_
 
@@ -362,13 +363,16 @@
 #define __NR_copy_file_range	(__NR_Linux + 346)
 #define __NR_preadv2		(__NR_Linux + 347)
 #define __NR_pwritev2		(__NR_Linux + 348)
+#define __NR_statx		(__NR_Linux + 349)
 
-#define __NR_Linux_syscalls	(__NR_pwritev2 + 1)
+#define __NR_Linux_syscalls	(__NR_statx + 1)
 
 
 #define __IGNORE_select		/* newselect */
 #define __IGNORE_fadvise64	/* fadvise64_64 */
-
+#define __IGNORE_pkey_mprotect
+#define __IGNORE_pkey_alloc
+#define __IGNORE_pkey_free
 
 #define LINUX_GATEWAY_ADDR      0x100
 

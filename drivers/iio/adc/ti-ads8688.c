@@ -369,7 +369,6 @@ static const struct iio_info ads8688_info = {
 	.write_raw = &ads8688_write_raw,
 	.write_raw_get_fmt = &ads8688_write_raw_get_fmt,
 	.attrs = &ads8688_attribute_group,
-	.driver_module = THIS_MODULE,
 };
 
 static const struct ads8688_chip_info ads8688_chip_info_tbl[] = {
@@ -438,7 +437,7 @@ static int ads8688_probe(struct spi_device *spi)
 	return 0;
 
 error_out:
-	if (!IS_ERR_OR_NULL(st->reg))
+	if (!IS_ERR(st->reg))
 		regulator_disable(st->reg);
 
 	return ret;
@@ -451,7 +450,7 @@ static int ads8688_remove(struct spi_device *spi)
 
 	iio_device_unregister(indio_dev);
 
-	if (!IS_ERR_OR_NULL(st->reg))
+	if (!IS_ERR(st->reg))
 		regulator_disable(st->reg);
 
 	return 0;
@@ -474,7 +473,6 @@ MODULE_DEVICE_TABLE(of, ads8688_of_match);
 static struct spi_driver ads8688_driver = {
 	.driver = {
 		.name	= "ads8688",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= ads8688_probe,
 	.remove		= ads8688_remove,

@@ -6,6 +6,8 @@
 FE_SET_FRONTEND
 ***************
 
+.. attention:: This ioctl is deprecated.
+
 Name
 ====
 
@@ -15,35 +17,18 @@ FE_SET_FRONTEND
 Synopsis
 ========
 
-.. cpp:function:: int ioctl(int fd, int request = FE_SET_FRONTEND, struct dvb_frontend_parameters *p)
+.. c:function:: int ioctl(int fd, FE_SET_FRONTEND, struct dvb_frontend_parameters *p)
+    :name: FE_SET_FRONTEND
 
 
 Arguments
 =========
 
-.. flat-table::
-    :header-rows:  0
-    :stub-columns: 0
+``fd``
+    File descriptor returned by :c:func:`open() <dvb-fe-open>`.
 
-
-    -  .. row 1
-
-       -  int fd
-
-       -  File descriptor returned by a previous call to open().
-
-    -  .. row 2
-
-       -  int request
-
-       -  Equals :ref:`FE_SET_FRONTEND` for this
-	  command.
-
-    -  .. row 3
-
-       -  struct dvb_frontend_parameters \*p
-
-       -  Points to parameters for tuning operation.
+``p``
+    Points to parameters for tuning operation.
 
 
 Description
@@ -63,17 +48,24 @@ requires read/write access to the device.
 Return Value
 ============
 
-On success 0 is returned, on error -1 and the ``errno`` variable is set
-appropriately. The generic error codes are described at the
-:ref:`Generic Error Codes <gen-errors>` chapter.
+On success 0 is returned.
+
+On error -1 is returned, and the ``errno`` variable is set
+appropriately.
+
+.. tabularcolumns:: |p{2.5cm}|p{15.0cm}|
 
 .. flat-table::
     :header-rows:  0
     :stub-columns: 0
-
+    :widths: 1 16
 
     -  .. row 1
 
        -  ``EINVAL``
 
        -  Maximum supported symbol rate reached.
+
+
+Generic error codes are described at the
+:ref:`Generic Error Codes <gen-errors>` chapter.

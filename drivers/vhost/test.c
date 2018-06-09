@@ -157,7 +157,7 @@ static int vhost_test_release(struct inode *inode, struct file *f)
 
 	vhost_test_stop(n, &private);
 	vhost_test_flush(n);
-	vhost_dev_cleanup(&n->dev, false);
+	vhost_dev_cleanup(&n->dev);
 	/* We do an extra flush before freeing memory,
 	 * since jobs can re-queue themselves. */
 	vhost_test_flush(n);
@@ -322,18 +322,7 @@ static struct miscdevice vhost_test_misc = {
 	"vhost-test",
 	&vhost_test_fops,
 };
-
-static int vhost_test_init(void)
-{
-	return misc_register(&vhost_test_misc);
-}
-module_init(vhost_test_init);
-
-static void vhost_test_exit(void)
-{
-	misc_deregister(&vhost_test_misc);
-}
-module_exit(vhost_test_exit);
+module_misc_device(vhost_test_misc);
 
 MODULE_VERSION("0.0.1");
 MODULE_LICENSE("GPL v2");

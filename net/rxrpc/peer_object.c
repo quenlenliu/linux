@@ -16,16 +16,15 @@
 #include <linux/skbuff.h>
 #include <linux/udp.h>
 #include <linux/in.h>
+#include <linux/in6.h>
 #include <linux/slab.h>
 #include <linux/hashtable.h>
 #include <net/sock.h>
 #include <net/af_rxrpc.h>
 #include <net/ip.h>
 #include <net/route.h>
+#include <net/ip6_route.h>
 #include "ar-internal.h"
-
-static DEFINE_HASHTABLE(rxrpc_peer_hash, 10);
-static DEFINE_SPINLOCK(rxrpc_peer_hash_lock);
 
 /*
  * Hash a peer key.
@@ -50,6 +49,13 @@ static unsigned long rxrpc_peer_hash_key(struct rxrpc_local *local,
 		size = sizeof(srx->transport.sin.sin_addr);
 		p = (u16 *)&srx->transport.sin.sin_addr;
 		break;
+#ifdef CONFIG_AF_RXRPC_IPV6
+	case AF_INET6:
+		hash_key += (u16 __force)srx->transport.sin.sin_port;
+		size = sizeof(srx->transport.sin6.sin6_addr);
+		p = (u16 *)&srx->transport.sin6.sin6_addr;
+		break;
+#endif
 	default:
 		WARN(1, "AF_RXRPC: Unsupported transport address family\n");
 		return 0;
@@ -93,6 +99,14 @@ static long rxrpc_peer_cmp_key(const struct rxrpc_peer *peer,
 			memcmp(&peer->srx.transport.sin.sin_addr,
 			       &srx->transport.sin.sin_addr,
 			       sizeof(struct in_addr));
+#ifdef CONFIG_AF_RXRPC_IPV6
+	case AF_INET6:
+		return ((u16 __force)peer->srx.transport.sin6.sin6_port -
+			(u16 __force)srx->transport.sin6.sin6_port) ?:
+			memcmp(&peer->srx.transport.sin6.sin6_addr,
+			       &srx->transport.sin6.sin6_addr,
+			       sizeof(struct in6_addr));
+#endif
 	default:
 		BUG();
 	}
@@ -107,8 +121,9 @@ static struct rxrpc_peer *__rxrpc_lookup_peer_rcu(
 	unsigned long hash_key)
 {
 	struct rxrpc_peer *peer;
+	struct rxrpc_net *rxnet = local->rxnet;
 
-	hash_for_each_possible_rcu(rxrpc_peer_hash, peer, hash_link, hash_key) {
+	hash_for_each_possible_rcu(rxnet->peer_hash, peer, hash_link, hash_key) {
 		if (rxrpc_peer_cmp_key(peer, local, srx, hash_key) == 0) {
 			if (atomic_read(&peer->usage) == 0)
 				return NULL;
@@ -130,17 +145,7 @@ struct rxrpc_peer *rxrpc_lookup_peer_rcu(struct rxrpc_local *local,
 
 	peer = __rxrpc_lookup_peer_rcu(local, srx, hash_key);
 	if (peer) {
-		switch (srx->transport.family) {
-		case AF_INET:
-			_net("PEER %d {%d,%u,%pI4+%hu}",
-			     peer->debug_id,
-			     peer->srx.transport_type,
-			     peer->srx.transport.family,
-			     &peer->srx.transport.sin.sin_addr,
-			     ntohs(peer->srx.transport.sin.sin_port));
-			break;
-		}
-
+		_net("PEER %d {%pISp}", peer->debug_id, &peer->srx.transport);
 		_leave(" = %p {u=%d}", peer, atomic_read(&peer->usage));
 	}
 	return peer;
@@ -152,22 +157,53 @@ struct rxrpc_peer *rxrpc_lookup_peer_rcu(struct rxrpc_local *local,
  */
 static void rxrpc_assess_MTU_size(struct rxrpc_peer *peer)
 {
+	struct dst_entry *dst;
 	struct rtable *rt;
-	struct flowi4 fl4;
+	struct flowi fl;
+	struct flowi4 *fl4 = &fl.u.ip4;
+#ifdef CONFIG_AF_RXRPC_IPV6
+	struct flowi6 *fl6 = &fl.u.ip6;
+#endif
 
 	peer->if_mtu = 1500;
 
-	rt = ip_route_output_ports(&init_net, &fl4, NULL,
-				   peer->srx.transport.sin.sin_addr.s_addr, 0,
-				   htons(7000), htons(7001),
-				   IPPROTO_UDP, 0, 0);
-	if (IS_ERR(rt)) {
-		_leave(" [route err %ld]", PTR_ERR(rt));
-		return;
+	memset(&fl, 0, sizeof(fl));
+	switch (peer->srx.transport.family) {
+	case AF_INET:
+		rt = ip_route_output_ports(
+			&init_net, fl4, NULL,
+			peer->srx.transport.sin.sin_addr.s_addr, 0,
+			htons(7000), htons(7001), IPPROTO_UDP, 0, 0);
+		if (IS_ERR(rt)) {
+			_leave(" [route err %ld]", PTR_ERR(rt));
+			return;
+		}
+		dst = &rt->dst;
+		break;
+
+#ifdef CONFIG_AF_RXRPC_IPV6
+	case AF_INET6:
+		fl6->flowi6_iif = LOOPBACK_IFINDEX;
+		fl6->flowi6_scope = RT_SCOPE_UNIVERSE;
+		fl6->flowi6_proto = IPPROTO_UDP;
+		memcpy(&fl6->daddr, &peer->srx.transport.sin6.sin6_addr,
+		       sizeof(struct in6_addr));
+		fl6->fl6_dport = htons(7001);
+		fl6->fl6_sport = htons(7000);
+		dst = ip6_route_output(&init_net, NULL, fl6);
+		if (dst->error) {
+			_leave(" [route err %d]", dst->error);
+			return;
+		}
+		break;
+#endif
+
+	default:
+		BUG();
 	}
 
-	peer->if_mtu = dst_mtu(&rt->dst);
-	dst_release(&rt->dst);
+	peer->if_mtu = dst_mtu(dst);
+	dst_release(dst);
 
 	_leave(" [if_mtu %u]", peer->if_mtu);
 }
@@ -192,10 +228,52 @@ struct rxrpc_peer *rxrpc_alloc_peer(struct rxrpc_local *local, gfp_t gfp)
 		seqlock_init(&peer->service_conn_lock);
 		spin_lock_init(&peer->lock);
 		peer->debug_id = atomic_inc_return(&rxrpc_debug_id);
+
+		if (RXRPC_TX_SMSS > 2190)
+			peer->cong_cwnd = 2;
+		else if (RXRPC_TX_SMSS > 1095)
+			peer->cong_cwnd = 3;
+		else
+			peer->cong_cwnd = 4;
 	}
 
 	_leave(" = %p", peer);
 	return peer;
+}
+
+/*
+ * Initialise peer record.
+ */
+static void rxrpc_init_peer(struct rxrpc_peer *peer, unsigned long hash_key)
+{
+	peer->hash_key = hash_key;
+	rxrpc_assess_MTU_size(peer);
+	peer->mtu = peer->if_mtu;
+	peer->rtt_last_req = ktime_get_real();
+
+	switch (peer->srx.transport.family) {
+	case AF_INET:
+		peer->hdrsize = sizeof(struct iphdr);
+		break;
+#ifdef CONFIG_AF_RXRPC_IPV6
+	case AF_INET6:
+		peer->hdrsize = sizeof(struct ipv6hdr);
+		break;
+#endif
+	default:
+		BUG();
+	}
+
+	switch (peer->srx.transport_type) {
+	case SOCK_DGRAM:
+		peer->hdrsize += sizeof(struct udphdr);
+		break;
+	default:
+		BUG();
+	}
+
+	peer->hdrsize += sizeof(struct rxrpc_wire_header);
+	peer->maxdata = peer->mtu - peer->hdrsize;
 }
 
 /*
@@ -212,31 +290,42 @@ static struct rxrpc_peer *rxrpc_create_peer(struct rxrpc_local *local,
 
 	peer = rxrpc_alloc_peer(local, gfp);
 	if (peer) {
-		peer->hash_key = hash_key;
 		memcpy(&peer->srx, srx, sizeof(*srx));
-
-		rxrpc_assess_MTU_size(peer);
-		peer->mtu = peer->if_mtu;
-
-		if (srx->transport.family == AF_INET) {
-			peer->hdrsize = sizeof(struct iphdr);
-			switch (srx->transport_type) {
-			case SOCK_DGRAM:
-				peer->hdrsize += sizeof(struct udphdr);
-				break;
-			default:
-				BUG();
-				break;
-			}
-		} else {
-			BUG();
-		}
-
-		peer->hdrsize += sizeof(struct rxrpc_wire_header);
-		peer->maxdata = peer->mtu - peer->hdrsize;
+		rxrpc_init_peer(peer, hash_key);
 	}
 
 	_leave(" = %p", peer);
+	return peer;
+}
+
+/*
+ * Set up a new incoming peer.  The address is prestored in the preallocated
+ * peer.
+ */
+struct rxrpc_peer *rxrpc_lookup_incoming_peer(struct rxrpc_local *local,
+					      struct rxrpc_peer *prealloc)
+{
+	struct rxrpc_peer *peer;
+	struct rxrpc_net *rxnet = local->rxnet;
+	unsigned long hash_key;
+
+	hash_key = rxrpc_peer_hash_key(local, &prealloc->srx);
+	prealloc->local = local;
+	rxrpc_init_peer(prealloc, hash_key);
+
+	spin_lock(&rxnet->peer_hash_lock);
+
+	/* Need to check that we aren't racing with someone else */
+	peer = __rxrpc_lookup_peer_rcu(local, &prealloc->srx, hash_key);
+	if (peer && !rxrpc_get_peer_maybe(peer))
+		peer = NULL;
+	if (!peer) {
+		peer = prealloc;
+		hash_add_rcu(rxnet->peer_hash, &peer->hash_link, hash_key);
+		hlist_add_head(&peer->keepalive_link, &rxnet->peer_keepalive_new);
+	}
+
+	spin_unlock(&rxnet->peer_hash_lock);
 	return peer;
 }
 
@@ -247,13 +336,10 @@ struct rxrpc_peer *rxrpc_lookup_peer(struct rxrpc_local *local,
 				     struct sockaddr_rxrpc *srx, gfp_t gfp)
 {
 	struct rxrpc_peer *peer, *candidate;
+	struct rxrpc_net *rxnet = local->rxnet;
 	unsigned long hash_key = rxrpc_peer_hash_key(local, srx);
 
-	_enter("{%d,%d,%pI4+%hu}",
-	       srx->transport_type,
-	       srx->transport_len,
-	       &srx->transport.sin.sin_addr,
-	       ntohs(srx->transport.sin.sin_port));
+	_enter("{%pISp}", &srx->transport);
 
 	/* search the peer list first */
 	rcu_read_lock();
@@ -272,17 +358,20 @@ struct rxrpc_peer *rxrpc_lookup_peer(struct rxrpc_local *local,
 			return NULL;
 		}
 
-		spin_lock(&rxrpc_peer_hash_lock);
+		spin_lock_bh(&rxnet->peer_hash_lock);
 
 		/* Need to check that we aren't racing with someone else */
 		peer = __rxrpc_lookup_peer_rcu(local, srx, hash_key);
 		if (peer && !rxrpc_get_peer_maybe(peer))
 			peer = NULL;
-		if (!peer)
-			hash_add_rcu(rxrpc_peer_hash,
+		if (!peer) {
+			hash_add_rcu(rxnet->peer_hash,
 				     &candidate->hash_link, hash_key);
+			hlist_add_head(&candidate->keepalive_link,
+				       &rxnet->peer_keepalive_new);
+		}
 
-		spin_unlock(&rxrpc_peer_hash_lock);
+		spin_unlock_bh(&rxnet->peer_hash_lock);
 
 		if (peer)
 			kfree(candidate);
@@ -290,26 +379,135 @@ struct rxrpc_peer *rxrpc_lookup_peer(struct rxrpc_local *local,
 			peer = candidate;
 	}
 
-	_net("PEER %d {%d,%pI4+%hu}",
-	     peer->debug_id,
-	     peer->srx.transport_type,
-	     &peer->srx.transport.sin.sin_addr,
-	     ntohs(peer->srx.transport.sin.sin_port));
+	_net("PEER %d {%pISp}", peer->debug_id, &peer->srx.transport);
 
 	_leave(" = %p {u=%d}", peer, atomic_read(&peer->usage));
 	return peer;
 }
 
 /*
- * Discard a ref on a remote peer record.
+ * Get a ref on a peer record.
  */
-void __rxrpc_put_peer(struct rxrpc_peer *peer)
+struct rxrpc_peer *rxrpc_get_peer(struct rxrpc_peer *peer)
 {
+	const void *here = __builtin_return_address(0);
+	int n;
+
+	n = atomic_inc_return(&peer->usage);
+	trace_rxrpc_peer(peer, rxrpc_peer_got, n, here);
+	return peer;
+}
+
+/*
+ * Get a ref on a peer record unless its usage has already reached 0.
+ */
+struct rxrpc_peer *rxrpc_get_peer_maybe(struct rxrpc_peer *peer)
+{
+	const void *here = __builtin_return_address(0);
+
+	if (peer) {
+		int n = __atomic_add_unless(&peer->usage, 1, 0);
+		if (n > 0)
+			trace_rxrpc_peer(peer, rxrpc_peer_got, n + 1, here);
+		else
+			peer = NULL;
+	}
+	return peer;
+}
+
+/*
+ * Queue a peer record.  This passes the caller's ref to the workqueue.
+ */
+void __rxrpc_queue_peer_error(struct rxrpc_peer *peer)
+{
+	const void *here = __builtin_return_address(0);
+	int n;
+
+	n = atomic_read(&peer->usage);
+	if (rxrpc_queue_work(&peer->error_distributor))
+		trace_rxrpc_peer(peer, rxrpc_peer_queued_error, n, here);
+	else
+		rxrpc_put_peer(peer);
+}
+
+/*
+ * Discard a peer record.
+ */
+static void __rxrpc_put_peer(struct rxrpc_peer *peer)
+{
+	struct rxrpc_net *rxnet = peer->local->rxnet;
+
 	ASSERT(hlist_empty(&peer->error_targets));
 
-	spin_lock(&rxrpc_peer_hash_lock);
+	spin_lock_bh(&rxnet->peer_hash_lock);
 	hash_del_rcu(&peer->hash_link);
-	spin_unlock(&rxrpc_peer_hash_lock);
+	hlist_del_init(&peer->keepalive_link);
+	spin_unlock_bh(&rxnet->peer_hash_lock);
 
 	kfree_rcu(peer, rcu);
 }
+
+/*
+ * Drop a ref on a peer record.
+ */
+void rxrpc_put_peer(struct rxrpc_peer *peer)
+{
+	const void *here = __builtin_return_address(0);
+	int n;
+
+	if (peer) {
+		n = atomic_dec_return(&peer->usage);
+		trace_rxrpc_peer(peer, rxrpc_peer_put, n, here);
+		if (n == 0)
+			__rxrpc_put_peer(peer);
+	}
+}
+
+/*
+ * Make sure all peer records have been discarded.
+ */
+void rxrpc_destroy_all_peers(struct rxrpc_net *rxnet)
+{
+	struct rxrpc_peer *peer;
+	int i;
+
+	for (i = 0; i < HASH_SIZE(rxnet->peer_hash); i++) {
+		if (hlist_empty(&rxnet->peer_hash[i]))
+			continue;
+
+		hlist_for_each_entry(peer, &rxnet->peer_hash[i], hash_link) {
+			pr_err("Leaked peer %u {%u} %pISp\n",
+			       peer->debug_id,
+			       atomic_read(&peer->usage),
+			       &peer->srx.transport);
+		}
+	}
+}
+
+/**
+ * rxrpc_kernel_get_peer - Get the peer address of a call
+ * @sock: The socket on which the call is in progress.
+ * @call: The call to query
+ * @_srx: Where to place the result
+ *
+ * Get the address of the remote peer in a call.
+ */
+void rxrpc_kernel_get_peer(struct socket *sock, struct rxrpc_call *call,
+			   struct sockaddr_rxrpc *_srx)
+{
+	*_srx = call->peer->srx;
+}
+EXPORT_SYMBOL(rxrpc_kernel_get_peer);
+
+/**
+ * rxrpc_kernel_get_rtt - Get a call's peer RTT
+ * @sock: The socket on which the call is in progress.
+ * @call: The call to query
+ *
+ * Get the call's peer RTT.
+ */
+u64 rxrpc_kernel_get_rtt(struct socket *sock, struct rxrpc_call *call)
+{
+	return call->peer->rtt;
+}
+EXPORT_SYMBOL(rxrpc_kernel_get_rtt);

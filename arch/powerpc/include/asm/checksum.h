@@ -12,6 +12,8 @@
 #ifdef CONFIG_GENERIC_CSUM
 #include <asm-generic/checksum.h>
 #else
+#include <linux/bitops.h>
+#include <linux/in6.h>
 /*
  * Computes the checksum of a memory block at src, length len,
  * and adds in "sum" (32-bit), while copying the block to dst.
@@ -53,19 +55,25 @@ static inline __sum16 csum_fold(__wsum sum)
 	return (__force __sum16)(~((__force u32)sum + tmp) >> 16);
 }
 
-static inline __wsum csum_tcpudp_nofold(__be32 saddr, __be32 daddr,
-                                     unsigned short len,
-                                     unsigned short proto,
-                                     __wsum sum)
+static inline u32 from64to32(u64 x)
+{
+	return (x + ror64(x, 32)) >> 32;
+}
+
+static inline __wsum csum_tcpudp_nofold(__be32 saddr, __be32 daddr, __u32 len,
+					__u8 proto, __wsum sum)
 {
 #ifdef __powerpc64__
-	unsigned long s = (__force u32)sum;
+	u64 s = (__force u32)sum;
 
 	s += (__force u32)saddr;
 	s += (__force u32)daddr;
+#ifdef __BIG_ENDIAN__
 	s += proto + len;
-	s += (s >> 32);
-	return (__force __wsum) s;
+#else
+	s += (proto + len) << 8;
+#endif
+	return (__force __wsum) from64to32(s);
 #else
     __asm__("\n\
 	addc %0,%0,%1 \n\
@@ -83,10 +91,8 @@ static inline __wsum csum_tcpudp_nofold(__be32 saddr, __be32 daddr,
  * computes the checksum of the TCP/UDP pseudo-header
  * returns a 16-bit checksum, already complemented
  */
-static inline __sum16 csum_tcpudp_magic(__be32 saddr, __be32 daddr,
-					unsigned short len,
-					unsigned short proto,
-					__wsum sum)
+static inline __sum16 csum_tcpudp_magic(__be32 saddr, __be32 daddr, __u32 len,
+					__u8 proto, __wsum sum)
 {
 	return csum_fold(csum_tcpudp_nofold(saddr, daddr, len, proto, sum));
 }
@@ -127,8 +133,7 @@ static inline __wsum ip_fast_csum_nofold(const void *iph, unsigned int ihl)
 
 	for (i = 0; i < ihl - 1; i++, ptr++)
 		s += *ptr;
-	s += (s >> 32);
-	return (__force __wsum)s;
+	return (__force __wsum)from64to32(s);
 #else
 	__wsum sum, tmp;
 
@@ -206,6 +211,11 @@ static inline __sum16 ip_compute_csum(const void *buff, int len)
 {
 	return csum_fold(csum_partial(buff, len, 0));
 }
+
+#define _HAVE_ARCH_IPV6_CSUM
+__sum16 csum_ipv6_magic(const struct in6_addr *saddr,
+			const struct in6_addr *daddr,
+			__u32 len, __u8 proto, __wsum sum);
 
 #endif
 #endif /* __KERNEL__ */

@@ -26,10 +26,10 @@
 #define PM_SUSPEND 1
 #define AUTO_SUSPEND_TIMER 5000 /* ms */
 
-#define RX_BUF_SIZE		(1024*32)
-#define TX_BUF_SIZE		(1024*32)
+#define RX_BUF_SIZE		(1024 * 32)
+#define TX_BUF_SIZE		(1024 * 32)
 #define SDU_BUF_SIZE	2048
-#define MAX_SDU_SIZE	(1024*30)
+#define MAX_SDU_SIZE	(1024 * 30)
 #define MAX_PACKET_IN_MULTI_SDU	256
 
 #define VID_GCT			0x1076
@@ -93,11 +93,11 @@ struct rx_cxt {
 
 struct lte_udev {
 	struct usb_device *usbdev;
-	struct gdm_endian gdm_ed;
 	struct tx_cxt tx;
 	struct rx_cxt rx;
 	struct delayed_work work_tx;
 	struct delayed_work work_rx;
+	u8 gdm_ed;
 	u8 send_complete;
 	u8 tx_stop;
 	struct usb_interface *intf;

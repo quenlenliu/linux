@@ -320,35 +320,20 @@ struct diag_pkt {
 /* RHF receive type error - bypass packet errors */
 #define RHF_RTE_BYPASS_NO_ERR		0x0
 
-/*
- * This structure contains the first field common to all protocols
- * that employ this chip.
- */
-struct hfi1_message_header {
-	__be16 lrh[4];
-};
-
 /* IB - LRH header constants */
 #define HFI1_LRH_GRH 0x0003      /* 1. word of IB LRH - next header: GRH */
 #define HFI1_LRH_BTH 0x0002      /* 1. word of IB LRH - next header: BTH */
 
 /* misc. */
+#define SC15_PACKET 0xF
 #define SIZE_OF_CRC 1
+#define SIZE_OF_LT 1
+#define MAX_16B_PADDING 12 /* CRC = 4, LT = 1, Pad = 0 to 7 bytes */
 
 #define LIM_MGMT_P_KEY       0x7FFF
 #define FULL_MGMT_P_KEY      0xFFFF
 
 #define DEFAULT_P_KEY LIM_MGMT_P_KEY
-#define HFI1_AETH_CREDIT_SHIFT 24
-#define HFI1_AETH_CREDIT_MASK 0x1F
-#define HFI1_AETH_CREDIT_INVAL 0x1F
-#define HFI1_MSN_MASK 0xFFFFFF
-#define HFI1_FECN_SHIFT 31
-#define HFI1_FECN_MASK 1
-#define HFI1_FECN_SMASK BIT(HFI1_FECN_SHIFT)
-#define HFI1_BECN_SHIFT 30
-#define HFI1_BECN_MASK 1
-#define HFI1_BECN_SMASK BIT(HFI1_BECN_SHIFT)
 
 #define HFI1_PSM_IOC_BASE_SEQ 0x0
 

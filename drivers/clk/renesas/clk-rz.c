@@ -1,5 +1,5 @@
 /*
- * rz Core CPG Clocks
+ * RZ/A1 Core CPG Clocks
  *
  * Copyright (C) 2013 Ideas On Board SPRL
  * Copyright (C) 2014 Wolfram Sang, Sang Engineering <wsa@sang-engineering.com>
@@ -25,9 +25,30 @@ struct rz_cpg {
 #define CPG_FRQCR	0x10
 #define CPG_FRQCR2	0x14
 
+#define PPR0		0xFCFE3200
+#define PIBC0		0xFCFE7000
+
+#define MD_CLK(x)	((x >> 2) & 1)	/* P0_2 */
+
 /* -----------------------------------------------------------------------------
  * Initialization
  */
+
+static u16 __init rz_cpg_read_mode_pins(void)
+{
+	void __iomem *ppr0, *pibc0;
+	u16 modes;
+
+	ppr0 = ioremap_nocache(PPR0, 2);
+	pibc0 = ioremap_nocache(PIBC0, 2);
+	BUG_ON(!ppr0 || !pibc0);
+	iowrite16(4, pibc0);	/* enable input buffer */
+	modes = ioread16(ppr0);
+	iounmap(ppr0);
+	iounmap(pibc0);
+
+	return modes;
+}
 
 static struct clk * __init
 rz_cpg_register_clock(struct device_node *np, struct rz_cpg *cpg, const char *name)
@@ -37,8 +58,7 @@ rz_cpg_register_clock(struct device_node *np, struct rz_cpg *cpg, const char *na
 	static const unsigned frqcr_tab[4] = { 3, 2, 0, 1 };
 
 	if (strcmp(name, "pll") == 0) {
-		/* FIXME: cpg_mode should be read from GPIO. But no GPIO support yet */
-		unsigned cpg_mode = 0; /* hardcoded to EXTAL for now */
+		unsigned int cpg_mode = MD_CLK(rz_cpg_read_mode_pins());
 		const char *parent_name = of_clk_get_parent_name(np, cpg_mode);
 
 		mult = cpg_mode ? (32 / 4) : 30;
@@ -55,9 +75,9 @@ rz_cpg_register_clock(struct device_node *np, struct rz_cpg *cpg, const char *na
 	 * let them run at fixed current speed and implement the details later.
 	 */
 	if (strcmp(name, "i") == 0)
-		val = (clk_readl(cpg->reg + CPG_FRQCR) >> 8) & 3;
+		val = (readl(cpg->reg + CPG_FRQCR) >> 8) & 3;
 	else if (strcmp(name, "g") == 0)
-		val = clk_readl(cpg->reg + CPG_FRQCR2) & 3;
+		val = readl(cpg->reg + CPG_FRQCR2) & 3;
 	else
 		return ERR_PTR(-EINVAL);
 

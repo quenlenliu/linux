@@ -3,7 +3,7 @@
  *
  * This code provides the generic "frontend" layer to call a matching
  * "backend" driver implementation of cleancache.  See
- * Documentation/vm/cleancache.txt for more information.
+ * Documentation/vm/cleancache.rst for more information.
  *
  * Copyright (C) 2009-2010 Oracle Corp. All rights reserved.
  * Author: Dan Magenheimer
@@ -130,7 +130,7 @@ void __cleancache_init_shared_fs(struct super_block *sb)
 	int pool_id = CLEANCACHE_NO_BACKEND_SHARED;
 
 	if (cleancache_ops) {
-		pool_id = cleancache_ops->init_shared_fs(sb->s_uuid, PAGE_SIZE);
+		pool_id = cleancache_ops->init_shared_fs(&sb->s_uuid, PAGE_SIZE);
 		if (pool_id < 0)
 			pool_id = CLEANCACHE_NO_POOL;
 	}

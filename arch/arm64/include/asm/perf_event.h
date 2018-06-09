@@ -17,6 +17,9 @@
 #ifndef __ASM_PERF_EVENT_H
 #define __ASM_PERF_EVENT_H
 
+#include <asm/stack_pointer.h>
+#include <asm/ptrace.h>
+
 #define	ARMV8_PMU_MAX_COUNTERS	32
 #define	ARMV8_PMU_COUNTER_MASK	(ARMV8_PMU_MAX_COUNTERS - 1)
 
@@ -46,7 +49,15 @@
 #define	ARMV8_PMU_EVTYPE_MASK	0xc800ffff	/* Mask for writable bits */
 #define	ARMV8_PMU_EVTYPE_EVENT	0xffff		/* Mask for EVENT bits */
 
-#define ARMV8_PMU_EVTYPE_EVENT_SW_INCR	0	/* Software increment event */
+/*
+ * PMUv3 event types: required events
+ */
+#define ARMV8_PMUV3_PERFCTR_SW_INCR				0x00
+#define ARMV8_PMUV3_PERFCTR_L1D_CACHE_REFILL			0x03
+#define ARMV8_PMUV3_PERFCTR_L1D_CACHE				0x04
+#define ARMV8_PMUV3_PERFCTR_BR_MIS_PRED				0x10
+#define ARMV8_PMUV3_PERFCTR_CPU_CYCLES				0x11
+#define ARMV8_PMUV3_PERFCTR_BR_PRED				0x12
 
 /*
  * Event filters for PMUv3
@@ -69,6 +80,7 @@ struct pt_regs;
 extern unsigned long perf_instruction_pointer(struct pt_regs *regs);
 extern unsigned long perf_misc_flags(struct pt_regs *regs);
 #define perf_misc_flags(regs)	perf_misc_flags(regs)
+#define perf_arch_bpf_user_pt_regs(regs) &regs->user_regs
 #endif
 
 #define perf_arch_fetch_caller_regs(regs, __ip) { \

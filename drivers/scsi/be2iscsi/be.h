@@ -1,18 +1,15 @@
-/**
- * Copyright (C) 2005 - 2015 Emulex
- * All rights reserved.
+/*
+ * Copyright 2017 Broadcom. All Rights Reserved.
+ * The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.  The full GNU General
+ * as published by the Free Software Foundation. The full GNU General
  * Public License is included in this distribution in the file called COPYING.
  *
  * Contact Information:
- * linux-drivers@avagotech.com
+ * linux-drivers@broadcom.com
  *
- * Emulex
- * 3333 Susan Street
- * Costa Mesa, CA 92626
  */
 
 #ifndef BEISCSI_H
@@ -84,23 +81,20 @@ static inline void queue_tail_inc(struct be_queue_info *q)
 /*ISCSI */
 
 struct be_aic_obj {		/* Adaptive interrupt coalescing (AIC) info */
-	bool enable;
-	u32 min_eqd;		/* in usecs */
-	u32 max_eqd;		/* in usecs */
-	u32 prev_eqd;		/* in usecs */
-	u32 et_eqd;		/* configured val when aic is off */
-	ulong jiffs;
-	u64 eq_prev;		/* Used to calculate eqe */
+	unsigned long jiffies;
+	u32 eq_prev;		/* Used to calculate eqe */
+	u32 prev_eqd;
+#define BEISCSI_EQ_DELAY_MIN	0
+#define BEISCSI_EQ_DELAY_DEF	32
+#define BEISCSI_EQ_DELAY_MAX	128
 };
 
 struct be_eq_obj {
-	bool todo_mcc_cq;
-	bool todo_cq;
 	u32 cq_count;
 	struct be_queue_info q;
 	struct beiscsi_hba *phba;
 	struct be_queue_info *cq;
-	struct work_struct work_cqs; /* Work Item */
+	struct work_struct mcc_work; /* Work Item */
 	struct irq_poll	iopoll;
 };
 
@@ -111,8 +105,11 @@ struct be_mcc_obj {
 
 struct beiscsi_mcc_tag_state {
 	unsigned long tag_state;
-#define MCC_TAG_STATE_RUNNING	1
-#define MCC_TAG_STATE_TIMEOUT	2
+#define MCC_TAG_STATE_RUNNING	0
+#define MCC_TAG_STATE_TIMEOUT	1
+#define MCC_TAG_STATE_ASYNC	2
+#define MCC_TAG_STATE_IGNORE	3
+	void (*cbfn)(struct beiscsi_hba *, unsigned int);
 	struct be_dma_mem tag_mem_state;
 };
 
@@ -151,10 +148,8 @@ struct be_ctrl_info {
 /* TAG is from 1...MAX_MCC_CMD, MASK includes MAX_MCC_CMD */
 #define MCC_Q_CMD_TAG_MASK	((MAX_MCC_CMD << 1) - 1)
 
-#define PAGE_SHIFT_4K 12
-#define PAGE_SIZE_4K (1 << PAGE_SHIFT_4K)
-#define mcc_timeout		120000 /* 12s timeout */
-#define BEISCSI_LOGOUT_SYNC_DELAY	250
+#define PAGE_SHIFT_4K		12
+#define PAGE_SIZE_4K		(1 << PAGE_SHIFT_4K)
 
 /* Returns number of pages spanned by the data starting at the given addr */
 #define PAGES_4K_SPANNED(_address, size)				\

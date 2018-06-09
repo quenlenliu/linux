@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PERF_SYMBOL
 #define __PERF_SYMBOL 1
 
@@ -13,7 +14,7 @@
 #include <libgen.h>
 #include "build-id.h"
 #include "event.h"
-#include "util.h"
+#include "path.h"
 
 #ifdef HAVE_LIBELF_SUPPORT
 #include <libelf.h>
@@ -56,8 +57,11 @@ struct symbol {
 	u64		start;
 	u64		end;
 	u16		namelen;
-	u8		binding;
-	bool		ignore;
+	u8		type:4;
+	u8		binding:4;
+	u8		idle:1;
+	u8		ignore:1;
+	u8		inlined:1;
 	u8		arch_sym;
 	char		name[0];
 };
@@ -88,6 +92,7 @@ struct symbol_conf {
 	unsigned short	priv_size;
 	unsigned short	nr_events;
 	bool		try_vmlinux_path,
+			init_annotation,
 			force,
 			ignore_vmlinux,
 			ignore_vmlinux_buildid,
@@ -99,6 +104,7 @@ struct symbol_conf {
 			show_total_period,
 			use_callchain,
 			cumulate_callchain,
+			show_branchflag_count,
 			exclude_other,
 			show_cpu_utilization,
 			initialized,
@@ -115,7 +121,8 @@ struct symbol_conf {
 			show_ref_callgraph,
 			hide_unresolved,
 			raw_trace,
-			report_hierarchy;
+			report_hierarchy,
+			inline_name;
 	const char	*vmlinux_name,
 			*kallsyms_name,
 			*source_prefix,
@@ -129,14 +136,16 @@ struct symbol_conf {
 			*pid_list_str,
 			*tid_list_str,
 			*sym_list_str,
-			*col_width_list_str;
+			*col_width_list_str,
+			*bt_stop_list_str;
        struct strlist	*dso_list,
 			*comm_list,
 			*sym_list,
 			*dso_from_list,
 			*dso_to_list,
 			*sym_from_list,
-			*sym_to_list;
+			*sym_to_list,
+			*bt_stop_list;
 	struct intlist	*pid_list,
 			*tid_list;
 	const char	*symfs;
@@ -180,6 +189,7 @@ struct addr_map_symbol {
 	struct symbol *sym;
 	u64	      addr;
 	u64	      al_addr;
+	u64	      phys_addr;
 };
 
 struct branch_info {
@@ -191,9 +201,10 @@ struct branch_info {
 };
 
 struct mem_info {
-	struct addr_map_symbol iaddr;
-	struct addr_map_symbol daddr;
-	union perf_mem_data_src data_src;
+	struct addr_map_symbol	iaddr;
+	struct addr_map_symbol	daddr;
+	union perf_mem_data_src	data_src;
+	refcount_t		refcnt;
 };
 
 struct addr_location {
@@ -201,6 +212,7 @@ struct addr_location {
 	struct thread *thread;
 	struct map    *map;
 	struct symbol *sym;
+	const char    *srcline;
 	u64	      addr;
 	char	      level;
 	u8	      filtered;
@@ -240,27 +252,24 @@ int symsrc__init(struct symsrc *ss, struct dso *dso, const char *name,
 bool symsrc__has_symtab(struct symsrc *ss);
 bool symsrc__possibly_runtime(struct symsrc *ss);
 
-int dso__load(struct dso *dso, struct map *map, symbol_filter_t filter);
+int dso__load(struct dso *dso, struct map *map);
 int dso__load_vmlinux(struct dso *dso, struct map *map,
-		      const char *vmlinux, bool vmlinux_allocated,
-		      symbol_filter_t filter);
-int dso__load_vmlinux_path(struct dso *dso, struct map *map,
-			   symbol_filter_t filter);
+		      const char *vmlinux, bool vmlinux_allocated);
+int dso__load_vmlinux_path(struct dso *dso, struct map *map);
 int __dso__load_kallsyms(struct dso *dso, const char *filename, struct map *map,
-			 bool no_kcore, symbol_filter_t filter);
-int dso__load_kallsyms(struct dso *dso, const char *filename, struct map *map,
-		       symbol_filter_t filter);
+			 bool no_kcore);
+int dso__load_kallsyms(struct dso *dso, const char *filename, struct map *map);
 
-void dso__insert_symbol(struct dso *dso, enum map_type type,
+void dso__insert_symbol(struct dso *dso,
 			struct symbol *sym);
 
-struct symbol *dso__find_symbol(struct dso *dso, enum map_type type,
-				u64 addr);
-struct symbol *dso__find_symbol_by_name(struct dso *dso, enum map_type type,
-					const char *name);
+struct symbol *dso__find_symbol(struct dso *dso, u64 addr);
+struct symbol *dso__find_symbol_by_name(struct dso *dso, const char *name);
+
 struct symbol *symbol__next_by_name(struct symbol *sym);
 
-struct symbol *dso__first_symbol(struct dso *dso, enum map_type type);
+struct symbol *dso__first_symbol(struct dso *dso);
+struct symbol *dso__last_symbol(struct dso *dso);
 struct symbol *dso__next_symbol(struct symbol *sym);
 
 enum dso_type dso__type_fd(int fd);
@@ -269,7 +278,7 @@ int filename__read_build_id(const char *filename, void *bf, size_t size);
 int sysfs__read_build_id(const char *filename, void *bf, size_t size);
 int modules__parse(const char *filename, void *arg,
 		   int (*process_module)(void *arg, const char *name,
-					 u64 start));
+					 u64 start, u64 size));
 int filename__read_debuglink(const char *filename, char *debuglink,
 			     size_t size);
 
@@ -277,10 +286,13 @@ struct perf_env;
 int symbol__init(struct perf_env *env);
 void symbol__exit(void);
 void symbol__elf_init(void);
-struct symbol *symbol__new(u64 start, u64 len, u8 binding, const char *name);
+int symbol__annotation_init(void);
+
+struct symbol *symbol__new(u64 start, u64 len, u8 binding, u8 type, const char *name);
 size_t __symbol__fprintf_symname_offs(const struct symbol *sym,
 				      const struct addr_location *al,
-				      bool unknown_as_addr, FILE *fp);
+				      bool unknown_as_addr,
+				      bool print_offsets, FILE *fp);
 size_t symbol__fprintf_symname_offs(const struct symbol *sym,
 				    const struct addr_location *al, FILE *fp);
 size_t __symbol__fprintf_symname(const struct symbol *sym,
@@ -288,23 +300,22 @@ size_t __symbol__fprintf_symname(const struct symbol *sym,
 				 bool unknown_as_addr, FILE *fp);
 size_t symbol__fprintf_symname(const struct symbol *sym, FILE *fp);
 size_t symbol__fprintf(struct symbol *sym, FILE *fp);
-bool symbol_type__is_a(char symbol_type, enum map_type map_type);
 bool symbol__restricted_filename(const char *filename,
 				 const char *restricted_filename);
-bool symbol__is_idle(struct symbol *sym);
 int symbol__config_symfs(const struct option *opt __maybe_unused,
 			 const char *dir, int unset __maybe_unused);
 
 int dso__load_sym(struct dso *dso, struct map *map, struct symsrc *syms_ss,
-		  struct symsrc *runtime_ss, symbol_filter_t filter,
-		  int kmodule);
-int dso__synthesize_plt_symbols(struct dso *dso, struct symsrc *ss,
-				struct map *map, symbol_filter_t filter);
+		  struct symsrc *runtime_ss, int kmodule);
+int dso__synthesize_plt_symbols(struct dso *dso, struct symsrc *ss);
 
+char *dso__demangle_sym(struct dso *dso, int kmodule, const char *elf_name);
+
+void __symbols__insert(struct rb_root *symbols, struct symbol *sym, bool kernel);
 void symbols__insert(struct rb_root *symbols, struct symbol *sym);
 void symbols__fixup_duplicate(struct rb_root *symbols);
 void symbols__fixup_end(struct rb_root *symbols);
-void __map_groups__fixup_end(struct map_groups *mg, enum map_type type);
+void map_groups__fixup_end(struct map_groups *mg);
 
 typedef int (*mapfn_t)(u64 start, u64 len, u64 pgoff, void *data);
 int file__read_maps(int fd, bool exe, mapfn_t mapfn, void *data,
@@ -337,15 +348,28 @@ bool elf__needs_adjust_symbols(GElf_Ehdr ehdr);
 void arch__sym_update(struct symbol *s, GElf_Sym *sym);
 #endif
 
+const char *arch__normalize_symbol_name(const char *name);
 #define SYMBOL_A 0
 #define SYMBOL_B 1
 
+int arch__compare_symbol_names(const char *namea, const char *nameb);
+int arch__compare_symbol_names_n(const char *namea, const char *nameb,
+				 unsigned int n);
 int arch__choose_best_symbol(struct symbol *syma, struct symbol *symb);
+
+enum symbol_tag_include {
+	SYMBOL_TAG_INCLUDE__NONE = 0,
+	SYMBOL_TAG_INCLUDE__DEFAULT_ONLY
+};
+
+int symbol__match_symbol_name(const char *namea, const char *nameb,
+			      enum symbol_tag_include includes);
 
 /* structure containing an SDT note's info */
 struct sdt_note {
 	char *name;			/* name of the note*/
 	char *provider;			/* provider name */
+	char *args;
 	bool bit32;			/* whether the location is 32 bits? */
 	union {				/* location, base and semaphore addrs */
 		Elf64_Addr a64[3];
@@ -363,5 +387,17 @@ int sdt_notes__get_count(struct list_head *start);
 #define SDT_NOTE_TYPE 3
 #define SDT_NOTE_NAME "stapsdt"
 #define NR_ADDR 3
+
+struct mem_info *mem_info__new(void);
+struct mem_info *mem_info__get(struct mem_info *mi);
+void   mem_info__put(struct mem_info *mi);
+
+static inline void __mem_info__zput(struct mem_info **mi)
+{
+	mem_info__put(*mi);
+	*mi = NULL;
+}
+
+#define mem_info__zput(mi) __mem_info__zput(&mi)
 
 #endif /* __PERF_SYMBOL */

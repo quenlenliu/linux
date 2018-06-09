@@ -137,6 +137,7 @@ static inline bool kvaser_is_usbcan(const struct usb_device_id *id)
 #define CMD_RESET_ERROR_COUNTER		49
 #define CMD_TX_ACKNOWLEDGE		50
 #define CMD_CAN_ERROR_EVENT		51
+#define CMD_FLUSH_QUEUE_REPLY		68
 
 #define CMD_LEAF_USB_THROTTLE		77
 #define CMD_LEAF_LOG_MESSAGE		106
@@ -459,7 +460,7 @@ struct kvaser_usb {
 	struct usb_endpoint_descriptor *bulk_in, *bulk_out;
 	struct usb_anchor rx_submitted;
 
-	/* @max_tx_urbs: Firmware-reported maximum number of oustanding,
+	/* @max_tx_urbs: Firmware-reported maximum number of outstanding,
 	 * not yet ACKed, transmissions on this device. This value is
 	 * also used as a sentinel for marking free tx contexts.
 	 */
@@ -608,8 +609,8 @@ static int kvaser_usb_wait_msg(const struct kvaser_usb *dev, u8 id,
 			}
 
 			if (pos + tmp->len > actual_len) {
-				dev_err(dev->udev->dev.parent,
-					"Format error\n");
+				dev_err_ratelimited(dev->udev->dev.parent,
+						    "Format error\n");
 				break;
 			}
 
@@ -787,10 +788,8 @@ static int kvaser_usb_simple_msg_async(struct kvaser_usb_net_priv *priv,
 	int err;
 
 	urb = usb_alloc_urb(0, GFP_ATOMIC);
-	if (!urb) {
-		netdev_err(netdev, "No memory left for URBs\n");
+	if (!urb)
 		return -ENOMEM;
-	}
 
 	buf = kmalloc(sizeof(struct kvaser_msg), GFP_ATOMIC);
 	if (!buf) {
@@ -814,6 +813,7 @@ static int kvaser_usb_simple_msg_async(struct kvaser_usb_net_priv *priv,
 	if (err) {
 		netdev_err(netdev, "Error transmitting URB\n");
 		usb_unanchor_urb(urb);
+		kfree(buf);
 		usb_free_urb(urb);
 		return err;
 	}
@@ -1179,7 +1179,7 @@ static void kvaser_usb_rx_can_msg(const struct kvaser_usb *dev,
 
 	skb = alloc_can_skb(priv->netdev, &cf);
 	if (!skb) {
-		stats->tx_dropped++;
+		stats->rx_dropped++;
 		return;
 	}
 
@@ -1303,6 +1303,11 @@ static void kvaser_usb_handle_message(const struct kvaser_usb *dev,
 			goto warn;
 		break;
 
+	case CMD_FLUSH_QUEUE_REPLY:
+		if (dev->family != KVASER_LEAF)
+			goto warn;
+		break;
+
 	default:
 warn:		dev_warn(dev->udev->dev.parent,
 			 "Unhandled message (%d)\n", msg->id);
@@ -1321,6 +1326,8 @@ static void kvaser_usb_read_bulk_callback(struct urb *urb)
 	case 0:
 		break;
 	case -ENOENT:
+	case -EPIPE:
+	case -EPROTO:
 	case -ESHUTDOWN:
 		return;
 	default:
@@ -1329,7 +1336,7 @@ static void kvaser_usb_read_bulk_callback(struct urb *urb)
 		goto resubmit_urb;
 	}
 
-	while (pos <= urb->actual_length - MSG_HEADER_LEN) {
+	while (pos <= (int)(urb->actual_length - MSG_HEADER_LEN)) {
 		msg = urb->transfer_buffer + pos;
 
 		/* The Kvaser firmware can only read and write messages that
@@ -1348,7 +1355,8 @@ static void kvaser_usb_read_bulk_callback(struct urb *urb)
 		}
 
 		if (pos + msg->len > urb->actual_length) {
-			dev_err(dev->udev->dev.parent, "Format error\n");
+			dev_err_ratelimited(dev->udev->dev.parent,
+					    "Format error\n");
 			break;
 		}
 
@@ -1393,8 +1401,6 @@ static int kvaser_usb_setup_rx_urbs(struct kvaser_usb *dev)
 
 		urb = usb_alloc_urb(0, GFP_KERNEL);
 		if (!urb) {
-			dev_warn(dev->udev->dev.parent,
-				 "No memory left for URBs\n");
 			err = -ENOMEM;
 			break;
 		}
@@ -1613,7 +1619,8 @@ static int kvaser_usb_close(struct net_device *netdev)
 	if (err)
 		netdev_warn(netdev, "Cannot flush queue, error %d\n", err);
 
-	if (kvaser_usb_send_simple_msg(dev, CMD_RESET_CHIP, priv->channel))
+	err = kvaser_usb_send_simple_msg(dev, CMD_RESET_CHIP, priv->channel);
+	if (err)
 		netdev_warn(netdev, "Cannot reset card, error %d\n", err);
 
 	err = kvaser_usb_stop_chip(priv);
@@ -1670,7 +1677,6 @@ static netdev_tx_t kvaser_usb_start_xmit(struct sk_buff *skb,
 
 	urb = usb_alloc_urb(0, GFP_ATOMIC);
 	if (!urb) {
-		netdev_err(netdev, "No memory left for URBs\n");
 		stats->tx_dropped++;
 		dev_kfree_skb(skb);
 		return NETDEV_TX_OK;
@@ -1766,6 +1772,7 @@ static netdev_tx_t kvaser_usb_start_xmit(struct sk_buff *skb,
 		spin_unlock_irqrestore(&priv->tx_contexts_lock, flags);
 
 		usb_unanchor_urb(urb);
+		kfree(buf);
 
 		stats->tx_dropped++;
 
@@ -2032,7 +2039,7 @@ static int kvaser_usb_probe(struct usb_interface *intf,
 		((dev->fw_version >> 16) & 0xff),
 		(dev->fw_version & 0xffff));
 
-	dev_dbg(&intf->dev, "Max oustanding tx = %d URBs\n", dev->max_tx_urbs);
+	dev_dbg(&intf->dev, "Max outstanding tx = %d URBs\n", dev->max_tx_urbs);
 
 	err = kvaser_usb_get_card_info(dev);
 	if (err) {

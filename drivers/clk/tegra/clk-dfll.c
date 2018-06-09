@@ -633,16 +633,12 @@ static int find_lut_index_for_rate(struct tegra_dfll *td, unsigned long rate)
 	struct dev_pm_opp *opp;
 	int i, uv;
 
-	rcu_read_lock();
-
 	opp = dev_pm_opp_find_freq_ceil(td->soc->dev, &rate);
-	if (IS_ERR(opp)) {
-		rcu_read_unlock();
+	if (IS_ERR(opp))
 		return PTR_ERR(opp);
-	}
-	uv = dev_pm_opp_get_voltage(opp);
 
-	rcu_read_unlock();
+	uv = dev_pm_opp_get_voltage(opp);
+	dev_pm_opp_put(opp);
 
 	for (i = 0; i < td->i2c_lut_size; i++) {
 		if (regulator_list_voltage(td->vdd_reg, td->i2c_lut[i]) == uv)
@@ -1440,8 +1436,6 @@ static int dfll_build_i2c_lut(struct tegra_dfll *td)
 	struct dev_pm_opp *opp;
 	int lut;
 
-	rcu_read_lock();
-
 	rate = ULONG_MAX;
 	opp = dev_pm_opp_find_freq_floor(td->soc->dev, &rate);
 	if (IS_ERR(opp)) {
@@ -1449,6 +1443,7 @@ static int dfll_build_i2c_lut(struct tegra_dfll *td)
 		goto out;
 	}
 	v_max = dev_pm_opp_get_voltage(opp);
+	dev_pm_opp_put(opp);
 
 	v = td->soc->cvb->min_millivolts * 1000;
 	lut = find_vdd_map_entry_exact(td, v);
@@ -1464,6 +1459,8 @@ static int dfll_build_i2c_lut(struct tegra_dfll *td)
 
 		if (v_opp <= td->soc->cvb->min_millivolts * 1000)
 			td->dvco_rate_min = dev_pm_opp_get_freq(opp);
+
+		dev_pm_opp_put(opp);
 
 		for (;;) {
 			v += max(1, (v_max - v) / (MAX_DFLL_VOLTAGES - j));
@@ -1496,8 +1493,6 @@ static int dfll_build_i2c_lut(struct tegra_dfll *td)
 		ret = 0;
 
 out:
-	rcu_read_unlock();
-
 	return ret;
 }
 
@@ -1733,10 +1728,10 @@ EXPORT_SYMBOL(tegra_dfll_register);
  * @pdev: DFLL platform_device *
  *
  * Unbind this driver from the DFLL hardware device represented by
- * @pdev. The DFLL must be disabled for this to succeed. Returns 0
- * upon success or -EBUSY if the DFLL is still active.
+ * @pdev. The DFLL must be disabled for this to succeed. Returns a
+ * soc pointer upon success or -EBUSY if the DFLL is still active.
  */
-int tegra_dfll_unregister(struct platform_device *pdev)
+struct tegra_dfll_soc_data *tegra_dfll_unregister(struct platform_device *pdev)
 {
 	struct tegra_dfll *td = platform_get_drvdata(pdev);
 
@@ -1744,7 +1739,7 @@ int tegra_dfll_unregister(struct platform_device *pdev)
 	if (td->mode != DFLL_DISABLED) {
 		dev_err(&pdev->dev,
 			"must disable DFLL before removing driver\n");
-		return -EBUSY;
+		return ERR_PTR(-EBUSY);
 	}
 
 	debugfs_remove_recursive(td->debugfs_dir);
@@ -1758,6 +1753,6 @@ int tegra_dfll_unregister(struct platform_device *pdev)
 
 	reset_control_assert(td->dvco_rst);
 
-	return 0;
+	return td->soc;
 }
 EXPORT_SYMBOL(tegra_dfll_unregister);

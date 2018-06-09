@@ -20,9 +20,9 @@ prototypes:
 	void (*d_iput)(struct dentry *, struct inode *);
 	char *(*d_dname)((struct dentry *dentry, char *buffer, int buflen);
 	struct vfsmount *(*d_automount)(struct path *path);
-	int (*d_manage)(struct dentry *, bool);
+	int (*d_manage)(const struct path *, bool);
 	struct dentry *(*d_real)(struct dentry *, const struct inode *,
-				 unsigned int);
+				 unsigned int, unsigned int);
 
 locking rules:
 		rename_lock	->d_lock	may block	rcu-walk
@@ -51,8 +51,6 @@ prototypes:
 	int (*rmdir) (struct inode *,struct dentry *);
 	int (*mknod) (struct inode *,struct dentry *,umode_t,dev_t);
 	int (*rename) (struct inode *, struct dentry *,
-			struct inode *, struct dentry *);
-	int (*rename2) (struct inode *, struct dentry *,
 			struct inode *, struct dentry *, unsigned int);
 	int (*readlink) (struct dentry *, char __user *,int);
 	const char *(*get_link) (struct dentry *, struct inode *, void **);
@@ -60,11 +58,8 @@ prototypes:
 	int (*permission) (struct inode *, int, unsigned int);
 	int (*get_acl)(struct inode *, int);
 	int (*setattr) (struct dentry *, struct iattr *);
-	int (*getattr) (struct vfsmount *, struct dentry *, struct kstat *);
-	int (*setxattr) (struct dentry *, const char *,const void *,size_t,int);
-	ssize_t (*getxattr) (struct dentry *, const char *, void *, size_t);
+	int (*getattr) (const struct path *, struct kstat *, u32, unsigned int);
 	ssize_t (*listxattr) (struct dentry *, char *, size_t);
-	int (*removexattr) (struct dentry *, const char *);
 	int (*fiemap)(struct inode *, struct fiemap_extent_info *, u64 start, u64 len);
 	void (*update_time)(struct inode *, struct timespec *, int);
 	int (*atomic_open)(struct inode *, struct dentry *,
@@ -74,39 +69,52 @@ prototypes:
 
 locking rules:
 	all may block
-		i_mutex(inode)
-lookup:		yes
-create:		yes
-link:		yes (both)
-mknod:		yes
-symlink:	yes
-mkdir:		yes
-unlink:		yes (both)
-rmdir:		yes (both)	(see below)
-rename:		yes (all)	(see below)
-rename2:	yes (all)	(see below)
+		i_rwsem(inode)
+lookup:		shared
+create:		exclusive
+link:		exclusive (both)
+mknod:		exclusive
+symlink:	exclusive
+mkdir:		exclusive
+unlink:		exclusive (both)
+rmdir:		exclusive (both)(see below)
+rename:		exclusive (all)	(see below)
 readlink:	no
 get_link:	no
-setattr:	yes
+setattr:	exclusive
 permission:	no (may not block if called in rcu-walk mode)
 get_acl:	no
 getattr:	no
-setxattr:	yes
-getxattr:	no
 listxattr:	no
-removexattr:	yes
 fiemap:		no
 update_time:	no
-atomic_open:	yes
+atomic_open:	exclusive
 tmpfile:	no
 
-	Additionally, ->rmdir(), ->unlink() and ->rename() have ->i_mutex on
-victim.
-	cross-directory ->rename() and rename2() has (per-superblock)
-->s_vfs_rename_sem.
+
+	Additionally, ->rmdir(), ->unlink() and ->rename() have ->i_rwsem
+	exclusive on victim.
+	cross-directory ->rename() has (per-superblock) ->s_vfs_rename_sem.
 
 See Documentation/filesystems/directory-locking for more detailed discussion
 of the locking scheme for directory operations.
+
+----------------------- xattr_handler operations -----------------------
+prototypes:
+	bool (*list)(struct dentry *dentry);
+	int (*get)(const struct xattr_handler *handler, struct dentry *dentry,
+		   struct inode *inode, const char *name, void *buffer,
+		   size_t size);
+	int (*set)(const struct xattr_handler *handler, struct dentry *dentry,
+		   struct inode *inode, const char *name, const void *buffer,
+		   size_t size, int flags);
+
+locking rules:
+	all may block
+		i_rwsem(inode)
+list:		no
+get:		no
+set:		exclusive
 
 --------------------------- super_operations ---------------------------
 prototypes:
@@ -209,14 +217,14 @@ prototypes:
 locking rules:
 	All except set_page_dirty and freepage may block
 
-			PageLocked(page)	i_mutex
+			PageLocked(page)	i_rwsem
 writepage:		yes, unlocks (see below)
 readpage:		yes, unlocks
 writepages:
 set_page_dirty		no
 readpages:
-write_begin:		locks the page		yes
-write_end:		yes, unlocks		yes
+write_begin:		locks the page		exclusive
+write_end:		yes, unlocks		exclusive
 bmap:
 invalidatepage:		yes
 releasepage:		yes
@@ -431,7 +439,10 @@ prototypes:
 	ssize_t (*read_iter) (struct kiocb *, struct iov_iter *);
 	ssize_t (*write_iter) (struct kiocb *, struct iov_iter *);
 	int (*iterate) (struct file *, struct dir_context *);
-	unsigned int (*poll) (struct file *, struct poll_table_struct *);
+	int (*iterate_shared) (struct file *, struct dir_context *);
+	__poll_t (*poll) (struct file *, struct poll_table_struct *);
+	struct wait_queue_head * (*get_poll_head)(struct file *, __poll_t);
+	__poll_t (*poll_mask) (struct file *, __poll_t);
 	long (*unlocked_ioctl) (struct file *, unsigned int, unsigned long);
 	long (*compat_ioctl) (struct file *, unsigned int, unsigned long);
 	int (*mmap) (struct file *, struct vm_area_struct *);
@@ -439,7 +450,6 @@ prototypes:
 	int (*flush) (struct file *);
 	int (*release) (struct inode *, struct file *);
 	int (*fsync) (struct file *, loff_t start, loff_t end, int datasync);
-	int (*aio_fsync) (struct kiocb *, int datasync);
 	int (*fasync) (int, struct file *, int);
 	int (*lock) (struct file *, int, struct file_lock *);
 	ssize_t (*readv) (struct file *, const struct iovec *, unsigned long,
@@ -463,7 +473,7 @@ prototypes:
 };
 
 locking rules:
-	All may block.
+	All except for ->poll_mask may block.
 
 ->llseek() locking has moved from llseek to the individual llseek
 implementations.  If your fs is not using generic_file_llseek, you
@@ -472,6 +482,10 @@ For many filesystems, it is probably safe to acquire the inode
 mutex or just to use i_size_read() instead.
 Note: this does not protect the file->f_pos against concurrent modifications
 since this is something the userspace has to take care about.
+
+->iterate() is called with i_rwsem exclusive.
+
+->iterate_shared() is called with i_rwsem at least shared.
 
 ->fasync() is responsible for maintaining the FASYNC bit in filp->f_flags.
 Most instances call fasync_helper(), which does that maintenance, so it's
@@ -490,6 +504,9 @@ in sys_read() and friends.
 ->setlease operations should call generic_setlease() before or after setting
 the lease within the individual filesystem to record the result of the
 operation
+
+->poll_mask can be called with or without the waitqueue lock for the waitqueue
+returned from ->get_poll_head.
 
 --------------------------- dquot_operations -------------------------------
 prototypes:
@@ -549,7 +566,7 @@ till "end_pgoff". ->map_pages() is called with page table locked and must
 not block.  If it's not possible to reach a page without blocking,
 filesystem should skip it. Filesystem should use do_set_pte() to setup
 page table entry. Pointer to entry associated with the page is passed in
-"pte" field in fault_env structure. Pointers to entries for other offsets
+"pte" field in vm_fault structure. Pointers to entries for other offsets
 should be calculated relative to "pte".
 
 	->page_mkwrite() is called when a previously read-only pte is

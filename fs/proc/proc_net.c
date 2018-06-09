@@ -8,7 +8,7 @@
  *  proc net directory handling functions
  */
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include <linux/errno.h>
 #include <linux/time.h>
@@ -17,10 +17,12 @@
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/sched.h>
+#include <linux/sched/task.h>
 #include <linux/module.h>
 #include <linux/bitops.h>
 #include <linux/mount.h>
 #include <linux/nsproxy.h>
+#include <linux/uidgid.h>
 #include <net/net_namespace.h>
 #include <linux/seq_file.h>
 
@@ -36,20 +38,20 @@ static struct net *get_proc_net(const struct inode *inode)
 	return maybe_get_net(PDE_NET(PDE(inode)));
 }
 
-int seq_open_net(struct inode *ino, struct file *f,
-		 const struct seq_operations *ops, int size)
+static int seq_open_net(struct inode *inode, struct file *file)
 {
-	struct net *net;
+	unsigned int state_size = PDE(inode)->state_size;
 	struct seq_net_private *p;
+	struct net *net;
 
-	BUG_ON(size < sizeof(*p));
+	WARN_ON_ONCE(state_size < sizeof(*p));
 
-	net = get_proc_net(ino);
-	if (net == NULL)
+	net = get_proc_net(inode);
+	if (!net)
 		return -ENXIO;
 
-	p = __seq_open_private(f, ops, size);
-	if (p == NULL) {
+	p = __seq_open_private(file, PDE(inode)->seq_ops, state_size);
+	if (!p) {
 		put_net(net);
 		return -ENOMEM;
 	}
@@ -58,51 +60,83 @@ int seq_open_net(struct inode *ino, struct file *f,
 #endif
 	return 0;
 }
-EXPORT_SYMBOL_GPL(seq_open_net);
 
-int single_open_net(struct inode *inode, struct file *file,
-		int (*show)(struct seq_file *, void *))
+static int seq_release_net(struct inode *ino, struct file *f)
 {
-	int err;
-	struct net *net;
-
-	err = -ENXIO;
-	net = get_proc_net(inode);
-	if (net == NULL)
-		goto err_net;
-
-	err = single_open(file, show, net);
-	if (err < 0)
-		goto err_open;
-
-	return 0;
-
-err_open:
-	put_net(net);
-err_net:
-	return err;
-}
-EXPORT_SYMBOL_GPL(single_open_net);
-
-int seq_release_net(struct inode *ino, struct file *f)
-{
-	struct seq_file *seq;
-
-	seq = f->private_data;
+	struct seq_file *seq = f->private_data;
 
 	put_net(seq_file_net(seq));
 	seq_release_private(ino, f);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(seq_release_net);
 
-int single_release_net(struct inode *ino, struct file *f)
+static const struct file_operations proc_net_seq_fops = {
+	.open		= seq_open_net,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release_net,
+};
+
+struct proc_dir_entry *proc_create_net_data(const char *name, umode_t mode,
+		struct proc_dir_entry *parent, const struct seq_operations *ops,
+		unsigned int state_size, void *data)
+{
+	struct proc_dir_entry *p;
+
+	p = proc_create_reg(name, mode, &parent, data);
+	if (!p)
+		return NULL;
+	p->proc_fops = &proc_net_seq_fops;
+	p->seq_ops = ops;
+	p->state_size = state_size;
+	return proc_register(parent, p);
+}
+EXPORT_SYMBOL_GPL(proc_create_net_data);
+
+static int single_open_net(struct inode *inode, struct file *file)
+{
+	struct proc_dir_entry *de = PDE(inode);
+	struct net *net;
+	int err;
+
+	net = get_proc_net(inode);
+	if (!net)
+		return -ENXIO;
+
+	err = single_open(file, de->single_show, net);
+	if (err)
+		put_net(net);
+	return err;
+}
+
+static int single_release_net(struct inode *ino, struct file *f)
 {
 	struct seq_file *seq = f->private_data;
 	put_net(seq->private);
 	return single_release(ino, f);
 }
-EXPORT_SYMBOL_GPL(single_release_net);
+
+static const struct file_operations proc_net_single_fops = {
+	.open		= single_open_net,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release_net,
+};
+
+struct proc_dir_entry *proc_create_net_single(const char *name, umode_t mode,
+		struct proc_dir_entry *parent,
+		int (*show)(struct seq_file *, void *), void *data)
+{
+	struct proc_dir_entry *p;
+
+	p = proc_create_reg(name, mode, &parent, data);
+	if (!p)
+		return NULL;
+	p->proc_fops = &proc_net_single_fops;
+	p->single_show = show;
+	return proc_register(parent, p);
+}
+EXPORT_SYMBOL_GPL(proc_create_net_single);
 
 static struct net *get_proc_task_net(struct inode *dir)
 {
@@ -133,16 +167,16 @@ static struct dentry *proc_tgid_net_lookup(struct inode *dir,
 	de = ERR_PTR(-ENOENT);
 	net = get_proc_task_net(dir);
 	if (net != NULL) {
-		de = proc_lookup_de(net->proc_net, dir, dentry);
+		de = proc_lookup_de(dir, dentry, net->proc_net);
 		put_net(net);
 	}
 	return de;
 }
 
-static int proc_tgid_net_getattr(struct vfsmount *mnt, struct dentry *dentry,
-		struct kstat *stat)
+static int proc_tgid_net_getattr(const struct path *path, struct kstat *stat,
+				 u32 request_mask, unsigned int query_flags)
 {
-	struct inode *inode = d_inode(dentry);
+	struct inode *inode = d_inode(path->dentry);
 	struct net *net;
 
 	net = get_proc_task_net(inode);
@@ -170,7 +204,7 @@ static int proc_tgid_net_readdir(struct file *file, struct dir_context *ctx)
 	ret = -EINVAL;
 	net = get_proc_task_net(file_inode(file));
 	if (net != NULL) {
-		ret = proc_readdir_de(net->proc_net, file, ctx);
+		ret = proc_readdir_de(file, ctx, net->proc_net);
 		put_net(net);
 	}
 	return ret;
@@ -185,10 +219,12 @@ const struct file_operations proc_net_operations = {
 static __net_init int proc_net_ns_init(struct net *net)
 {
 	struct proc_dir_entry *netd, *net_statd;
+	kuid_t uid;
+	kgid_t gid;
 	int err;
 
 	err = -ENOMEM;
-	netd = kzalloc(sizeof(*netd) + 4, GFP_KERNEL);
+	netd = kmem_cache_zalloc(proc_dir_entry_cache, GFP_KERNEL);
 	if (!netd)
 		goto out;
 
@@ -197,7 +233,18 @@ static __net_init int proc_net_ns_init(struct net *net)
 	netd->nlink = 2;
 	netd->namelen = 3;
 	netd->parent = &proc_root;
+	netd->name = netd->inline_name;
 	memcpy(netd->name, "net", 4);
+
+	uid = make_kuid(net->user_ns, 0);
+	if (!uid_valid(uid))
+		uid = netd->uid;
+
+	gid = make_kgid(net->user_ns, 0);
+	if (!gid_valid(gid))
+		gid = netd->gid;
+
+	proc_set_user(netd, uid, gid);
 
 	err = -EEXIST;
 	net_statd = proc_net_mkdir(net, "stat", netd);
@@ -209,7 +256,7 @@ static __net_init int proc_net_ns_init(struct net *net)
 	return 0;
 
 free_net:
-	kfree(netd);
+	pde_free(netd);
 out:
 	return err;
 }
@@ -217,7 +264,7 @@ out:
 static __net_exit void proc_net_ns_exit(struct net *net)
 {
 	remove_proc_entry("stat", net->proc_net);
-	kfree(net->proc_net);
+	pde_free(net->proc_net);
 }
 
 static struct pernet_operations __net_initdata proc_net_ns_ops = {

@@ -175,10 +175,7 @@ static int spi_st_transfer_one(struct spi_master *master,
 
 static void spi_st_cleanup(struct spi_device *spi)
 {
-	int cs = spi->cs_gpio;
-
-	if (gpio_is_valid(cs))
-		devm_gpio_free(&spi->dev, cs);
+	gpio_free(spi->cs_gpio);
 }
 
 /* the spi->mode bits understood by this driver: */
@@ -201,14 +198,15 @@ static int spi_st_setup(struct spi_device *spi)
 		return -EINVAL;
 	}
 
-	if (devm_gpio_request(&spi->dev, cs, dev_name(&spi->dev))) {
+	ret = gpio_request(cs, dev_name(&spi->dev));
+	if (ret) {
 		dev_err(&spi->dev, "could not request gpio:%d\n", cs);
-		return -EINVAL;
+		return ret;
 	}
 
 	ret = gpio_direction_output(cs, spi->mode & SPI_CS_HIGH);
 	if (ret)
-		return ret;
+		goto out_free_gpio;
 
 	spi_st_clk = clk_get_rate(spi_st->clk);
 
@@ -217,7 +215,8 @@ static int spi_st_setup(struct spi_device *spi)
 	if (sscbrg < 0x07 || sscbrg > BIT(16)) {
 		dev_err(&spi->dev,
 			"baudrate %d outside valid range %d\n", sscbrg, hz);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_free_gpio;
 	}
 
 	spi_st->baud = spi_st_clk / (2 * sscbrg);
@@ -230,42 +229,46 @@ static int spi_st_setup(struct spi_device *spi)
 		"setting baudrate:target= %u hz, actual= %u hz, sscbrg= %u\n",
 		hz, spi_st->baud, sscbrg);
 
-	 /* Set SSC_CTL and enable SSC */
-	 var = readl_relaxed(spi_st->base + SSC_CTL);
-	 var |= SSC_CTL_MS;
+	/* Set SSC_CTL and enable SSC */
+	var = readl_relaxed(spi_st->base + SSC_CTL);
+	var |= SSC_CTL_MS;
 
-	 if (spi->mode & SPI_CPOL)
+	if (spi->mode & SPI_CPOL)
 		var |= SSC_CTL_PO;
-	 else
+	else
 		var &= ~SSC_CTL_PO;
 
-	 if (spi->mode & SPI_CPHA)
+	if (spi->mode & SPI_CPHA)
 		var |= SSC_CTL_PH;
-	 else
+	else
 		var &= ~SSC_CTL_PH;
 
-	 if ((spi->mode & SPI_LSB_FIRST) == 0)
+	if ((spi->mode & SPI_LSB_FIRST) == 0)
 		var |= SSC_CTL_HB;
-	 else
+	else
 		var &= ~SSC_CTL_HB;
 
-	 if (spi->mode & SPI_LOOP)
+	if (spi->mode & SPI_LOOP)
 		var |= SSC_CTL_LPB;
-	 else
+	else
 		var &= ~SSC_CTL_LPB;
 
-	 var &= ~SSC_CTL_DATA_WIDTH_MSK;
-	 var |= (spi->bits_per_word - 1);
+	var &= ~SSC_CTL_DATA_WIDTH_MSK;
+	var |= (spi->bits_per_word - 1);
 
-	 var |= SSC_CTL_EN_TX_FIFO | SSC_CTL_EN_RX_FIFO;
-	 var |= SSC_CTL_EN;
+	var |= SSC_CTL_EN_TX_FIFO | SSC_CTL_EN_RX_FIFO;
+	var |= SSC_CTL_EN;
 
-	 writel_relaxed(var, spi_st->base + SSC_CTL);
+	writel_relaxed(var, spi_st->base + SSC_CTL);
 
-	 /* Clear the status register */
-	 readl_relaxed(spi_st->base + SSC_RBUF);
+	/* Clear the status register */
+	readl_relaxed(spi_st->base + SSC_RBUF);
 
-	 return 0;
+	return 0;
+
+out_free_gpio:
+	gpio_free(cs);
+	return ret;
 }
 
 /* Interrupt fired when TX shift register becomes empty */

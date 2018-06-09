@@ -262,6 +262,7 @@ static int drbg_kcapi_sym_ctr(struct drbg_state *drbg,
 			      u8 *inbuf, u32 inbuflen,
 			      u8 *outbuf, u32 outlen);
 #define DRBG_CTR_NULL_LEN 128
+#define DRBG_OUTSCRATCHLEN DRBG_CTR_NULL_LEN
 
 /* BCC function for CTR DRBG as defined in 10.4.3 */
 static int drbg_ctr_bcc(struct drbg_state *drbg,
@@ -1132,10 +1133,12 @@ static inline void drbg_dealloc_state(struct drbg_state *drbg)
 {
 	if (!drbg)
 		return;
-	kzfree(drbg->V);
+	kzfree(drbg->Vbuf);
 	drbg->Vbuf = NULL;
-	kzfree(drbg->C);
+	drbg->V = NULL;
+	kzfree(drbg->Cbuf);
 	drbg->Cbuf = NULL;
+	drbg->C = NULL;
 	kzfree(drbg->scratchpadbuf);
 	drbg->scratchpadbuf = NULL;
 	drbg->reseed_ctr = 0;
@@ -1178,12 +1181,16 @@ static inline int drbg_alloc_state(struct drbg_state *drbg)
 		goto err;
 
 	drbg->Vbuf = kmalloc(drbg_statelen(drbg) + ret, GFP_KERNEL);
-	if (!drbg->Vbuf)
+	if (!drbg->Vbuf) {
+		ret = -ENOMEM;
 		goto fini;
+	}
 	drbg->V = PTR_ALIGN(drbg->Vbuf, ret + 1);
 	drbg->Cbuf = kmalloc(drbg_statelen(drbg) + ret, GFP_KERNEL);
-	if (!drbg->Cbuf)
+	if (!drbg->Cbuf) {
+		ret = -ENOMEM;
 		goto fini;
+	}
 	drbg->C = PTR_ALIGN(drbg->Cbuf, ret + 1);
 	/* scratchpad is only generated for CTR and Hash */
 	if (drbg->core->flags & DRBG_HMAC)
@@ -1199,8 +1206,10 @@ static inline int drbg_alloc_state(struct drbg_state *drbg)
 
 	if (0 < sb_size) {
 		drbg->scratchpadbuf = kzalloc(sb_size + ret, GFP_KERNEL);
-		if (!drbg->scratchpadbuf)
+		if (!drbg->scratchpadbuf) {
+			ret = -ENOMEM;
 			goto fini;
+		}
 		drbg->scratchpad = PTR_ALIGN(drbg->scratchpadbuf, ret + 1);
 	}
 
@@ -1638,17 +1647,10 @@ static int drbg_fini_sym_kernel(struct drbg_state *drbg)
 	kfree(drbg->ctr_null_value_buf);
 	drbg->ctr_null_value = NULL;
 
+	kfree(drbg->outscratchpadbuf);
+	drbg->outscratchpadbuf = NULL;
+
 	return 0;
-}
-
-static void drbg_skcipher_cb(struct crypto_async_request *req, int error)
-{
-	struct drbg_state *drbg = req->data;
-
-	if (error == -EINPROGRESS)
-		return;
-	drbg->ctr_async_err = error;
-	complete(&drbg->ctr_completion);
 }
 
 static int drbg_init_sym_kernel(struct drbg_state *drbg)
@@ -1681,6 +1683,7 @@ static int drbg_init_sym_kernel(struct drbg_state *drbg)
 		return PTR_ERR(sk_tfm);
 	}
 	drbg->ctr_handle = sk_tfm;
+	crypto_init_wait(&drbg->ctr_wait);
 
 	req = skcipher_request_alloc(sk_tfm, GFP_KERNEL);
 	if (!req) {
@@ -1689,8 +1692,9 @@ static int drbg_init_sym_kernel(struct drbg_state *drbg)
 		return -ENOMEM;
 	}
 	drbg->ctr_req = req;
-	skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
-					drbg_skcipher_cb, drbg);
+	skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG |
+						CRYPTO_TFM_REQ_MAY_SLEEP,
+					crypto_req_done, &drbg->ctr_wait);
 
 	alignmask = crypto_skcipher_alignmask(sk_tfm);
 	drbg->ctr_null_value_buf = kzalloc(DRBG_CTR_NULL_LEN + alignmask,
@@ -1701,6 +1705,15 @@ static int drbg_init_sym_kernel(struct drbg_state *drbg)
 	}
 	drbg->ctr_null_value = (u8 *)PTR_ALIGN(drbg->ctr_null_value_buf,
 					       alignmask + 1);
+
+	drbg->outscratchpadbuf = kmalloc(DRBG_OUTSCRATCHLEN + alignmask,
+					 GFP_KERNEL);
+	if (!drbg->outscratchpadbuf) {
+		drbg_fini_sym_kernel(drbg);
+		return -ENOMEM;
+	}
+	drbg->outscratchpad = (u8 *)PTR_ALIGN(drbg->outscratchpadbuf,
+					      alignmask + 1);
 
 	return alignmask;
 }
@@ -1730,39 +1743,35 @@ static int drbg_kcapi_sym_ctr(struct drbg_state *drbg,
 			      u8 *inbuf, u32 inlen,
 			      u8 *outbuf, u32 outlen)
 {
-	struct scatterlist sg_in;
+	struct scatterlist sg_in, sg_out;
+	int ret;
 
 	sg_init_one(&sg_in, inbuf, inlen);
+	sg_init_one(&sg_out, drbg->outscratchpad, DRBG_OUTSCRATCHLEN);
 
 	while (outlen) {
-		u32 cryptlen = min_t(u32, inlen, outlen);
-		struct scatterlist sg_out;
-		int ret;
+		u32 cryptlen = min3(inlen, outlen, (u32)DRBG_OUTSCRATCHLEN);
 
-		sg_init_one(&sg_out, outbuf, cryptlen);
+		/* Output buffer may not be valid for SGL, use scratchpad */
 		skcipher_request_set_crypt(drbg->ctr_req, &sg_in, &sg_out,
 					   cryptlen, drbg->V);
-		ret = crypto_skcipher_encrypt(drbg->ctr_req);
-		switch (ret) {
-		case 0:
-			break;
-		case -EINPROGRESS:
-		case -EBUSY:
-			ret = wait_for_completion_interruptible(
-				&drbg->ctr_completion);
-			if (!ret && !drbg->ctr_async_err) {
-				reinit_completion(&drbg->ctr_completion);
-				break;
-			}
-		default:
-			return ret;
-		}
-		init_completion(&drbg->ctr_completion);
+		ret = crypto_wait_req(crypto_skcipher_encrypt(drbg->ctr_req),
+					&drbg->ctr_wait);
+		if (ret)
+			goto out;
+
+		crypto_init_wait(&drbg->ctr_wait);
+
+		memcpy(outbuf, drbg->outscratchpad, cryptlen);
 
 		outlen -= cryptlen;
+		outbuf += cryptlen;
 	}
+	ret = 0;
 
-	return 0;
+out:
+	memzero_explicit(drbg->outscratchpad, DRBG_OUTSCRATCHLEN);
+	return ret;
 }
 #endif /* CONFIG_CRYPTO_DRBG_CTR */
 
@@ -1917,6 +1926,8 @@ static inline int __init drbg_healthcheck_sanity(void)
 		return -ENOMEM;
 
 	mutex_init(&drbg->drbg_mutex);
+	drbg->core = &drbg_cores[coreref];
+	drbg->reseed_threshold = drbg_max_requests(drbg);
 
 	/*
 	 * if the following tests fail, it is likely that there is a buffer
@@ -1926,12 +1937,6 @@ static inline int __init drbg_healthcheck_sanity(void)
 	 * grave bug.
 	 */
 
-	/* get a valid instance of DRBG for following tests */
-	ret = drbg_instantiate(drbg, NULL, coreref, pr);
-	if (ret) {
-		rc = ret;
-		goto outbuf;
-	}
 	max_addtllen = drbg_max_addtl(drbg);
 	max_request_bytes = drbg_max_request_bytes(drbg);
 	drbg_string_fill(&addtl, buf, max_addtllen + 1);
@@ -1941,10 +1946,9 @@ static inline int __init drbg_healthcheck_sanity(void)
 	/* overflow max_bits */
 	len = drbg_generate(drbg, buf, (max_request_bytes + 1), NULL);
 	BUG_ON(0 < len);
-	drbg_uninstantiate(drbg);
 
 	/* overflow max addtllen with personalization string */
-	ret = drbg_instantiate(drbg, &addtl, coreref, pr);
+	ret = drbg_seed(drbg, &addtl, false);
 	BUG_ON(0 == ret);
 	/* all tests passed */
 	rc = 0;
@@ -1952,9 +1956,7 @@ static inline int __init drbg_healthcheck_sanity(void)
 	pr_devel("DRBG: Sanity tests for failure code paths successfully "
 		 "completed\n");
 
-	drbg_uninstantiate(drbg);
-outbuf:
-	kzfree(drbg);
+	kfree(drbg);
 	return rc;
 }
 
@@ -2006,7 +2008,7 @@ static int __init drbg_init(void)
 {
 	unsigned int i = 0; /* pointer to drbg_algs */
 	unsigned int j = 0; /* pointer to drbg_cores */
-	int ret = -EFAULT;
+	int ret;
 
 	ret = drbg_healthcheck_sanity();
 	if (ret)
@@ -2016,7 +2018,7 @@ static int __init drbg_init(void)
 		pr_info("DRBG: Cannot register all DRBG types"
 			"(slots needed: %zu, slots available: %zu)\n",
 			ARRAY_SIZE(drbg_cores) * 2, ARRAY_SIZE(drbg_algs));
-		return ret;
+		return -EFAULT;
 	}
 
 	/*

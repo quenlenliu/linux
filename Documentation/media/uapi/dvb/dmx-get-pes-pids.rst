@@ -15,45 +15,50 @@ DMX_GET_PES_PIDS
 Synopsis
 --------
 
-.. cpp:function:: int ioctl(fd, int request = DMX_GET_PES_PIDS, __u16[5])
-
+.. c:function:: int ioctl(fd, DMX_GET_PES_PIDS, __u16 pids[5])
+    :name: DMX_GET_PES_PIDS
 
 Arguments
 ---------
 
-.. flat-table::
-    :header-rows:  0
-    :stub-columns: 0
+``fd``
+    File descriptor returned by :c:func:`open() <dvb-dmx-open>`.
 
-
-    -  .. row 1
-
-       -  int fd
-
-       -  File descriptor returned by a previous call to open().
-
-    -  .. row 2
-
-       -  int request
-
-       -  Equals DMX_GET_PES_PIDS for this command.
-
-    -  .. row 3
-
-       -  __u16[5]
-
-       -  Undocumented.
+``pids``
+    Array used to store 5 Program IDs.
 
 
 Description
 -----------
 
-This ioctl is undocumented. Documentation is welcome.
+This ioctl allows to query a DVB device to return the first PID used
+by audio, video, textext, subtitle and PCR programs on a given service.
+They're stored as:
+
+=======================	========	=======================================
+PID  element		position	content
+=======================	========	=======================================
+pids[DMX_PES_AUDIO]	0		first audio PID
+pids[DMX_PES_VIDEO]	1		first video PID
+pids[DMX_PES_TELETEXT]	2		first teletext PID
+pids[DMX_PES_SUBTITLE]	3		first subtitle PID
+pids[DMX_PES_PCR]	4		first Program Clock Reference PID
+=======================	========	=======================================
+
+
+.. note::
+
+	A value equal to 0xffff means that the PID was not filled by the
+	Kernel.
 
 
 Return Value
 ------------
 
-On success 0 is returned, on error -1 and the ``errno`` variable is set
-appropriately. The generic error codes are described at the
+On success 0 is returned.
+
+On error -1 is returned, and the ``errno`` variable is set
+appropriately.
+
+The generic error codes are described at the
 :ref:`Generic Error Codes <gen-errors>` chapter.

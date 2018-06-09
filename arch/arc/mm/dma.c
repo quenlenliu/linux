@@ -16,13 +16,12 @@
  * The default DMA address == Phy address which is 0x8000_0000 based.
  */
 
-#include <linux/dma-mapping.h>
+#include <linux/dma-noncoherent.h>
 #include <asm/cache.h>
 #include <asm/cacheflush.h>
 
-
-static void *arc_dma_alloc(struct device *dev, size_t size,
-		dma_addr_t *dma_handle, gfp_t gfp, unsigned long attrs)
+void *arch_dma_alloc(struct device *dev, size_t size, dma_addr_t *dma_handle,
+		gfp_t gfp, unsigned long attrs)
 {
 	unsigned long order = get_order(size);
 	struct page *page;
@@ -45,7 +44,7 @@ static void *arc_dma_alloc(struct device *dev, size_t size,
 	 *   -For coherent data, Read/Write to buffers terminate early in cache
 	 *   (vs. always going to memory - thus are faster)
 	 */
-	if ((is_isa_arcv2() && ioc_exists) ||
+	if ((is_isa_arcv2() && ioc_enable) ||
 	    (attrs & DMA_ATTR_NON_CONSISTENT))
 		need_coh = 0;
 
@@ -60,7 +59,7 @@ static void *arc_dma_alloc(struct device *dev, size_t size,
 	/* This is linear addr (0x8000_0000 based) */
 	paddr = page_to_phys(page);
 
-	*dma_handle = plat_phys_to_dma(dev, paddr);
+	*dma_handle = paddr;
 
 	/* This is kernel Virtual address (0x7000_0000 based) */
 	if (need_kvaddr) {
@@ -89,15 +88,15 @@ static void *arc_dma_alloc(struct device *dev, size_t size,
 	return kvaddr;
 }
 
-static void arc_dma_free(struct device *dev, size_t size, void *vaddr,
+void arch_dma_free(struct device *dev, size_t size, void *vaddr,
 		dma_addr_t dma_handle, unsigned long attrs)
 {
-	phys_addr_t paddr = plat_dma_to_phys(dev, dma_handle);
+	phys_addr_t paddr = dma_handle;
 	struct page *page = virt_to_page(paddr);
 	int is_non_coh = 1;
 
 	is_non_coh = (attrs & DMA_ATTR_NON_CONSISTENT) ||
-			(is_isa_arcv2() && ioc_exists);
+			(is_isa_arcv2() && ioc_enable);
 
 	if (PageHighMem(page) || !is_non_coh)
 		iounmap((void __force __iomem *)vaddr);
@@ -105,100 +104,39 @@ static void arc_dma_free(struct device *dev, size_t size, void *vaddr,
 	__free_pages(page, get_order(size));
 }
 
-/*
- * streaming DMA Mapping API...
- * CPU accesses page via normal paddr, thus needs to explicitly made
- * consistent before each use
- */
-static void _dma_cache_sync(phys_addr_t paddr, size_t size,
-		enum dma_data_direction dir)
-{
-	switch (dir) {
-	case DMA_FROM_DEVICE:
-		dma_cache_inv(paddr, size);
-		break;
-	case DMA_TO_DEVICE:
-		dma_cache_wback(paddr, size);
-		break;
-	case DMA_BIDIRECTIONAL:
-		dma_cache_wback_inv(paddr, size);
-		break;
-	default:
-		pr_err("Invalid DMA dir [%d] for OP @ %pa[p]\n", dir, &paddr);
-	}
-}
-
-static dma_addr_t arc_dma_map_page(struct device *dev, struct page *page,
-		unsigned long offset, size_t size, enum dma_data_direction dir,
+int arch_dma_mmap(struct device *dev, struct vm_area_struct *vma,
+		void *cpu_addr, dma_addr_t dma_addr, size_t size,
 		unsigned long attrs)
 {
-	phys_addr_t paddr = page_to_phys(page) + offset;
-	_dma_cache_sync(paddr, size, dir);
-	return plat_phys_to_dma(dev, paddr);
+	unsigned long user_count = vma_pages(vma);
+	unsigned long count = PAGE_ALIGN(size) >> PAGE_SHIFT;
+	unsigned long pfn = __phys_to_pfn(dma_addr);
+	unsigned long off = vma->vm_pgoff;
+	int ret = -ENXIO;
+
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+
+	if (dma_mmap_from_dev_coherent(dev, vma, cpu_addr, size, &ret))
+		return ret;
+
+	if (off < count && user_count <= (count - off)) {
+		ret = remap_pfn_range(vma, vma->vm_start,
+				      pfn + off,
+				      user_count << PAGE_SHIFT,
+				      vma->vm_page_prot);
+	}
+
+	return ret;
 }
 
-static int arc_dma_map_sg(struct device *dev, struct scatterlist *sg,
-	   int nents, enum dma_data_direction dir, unsigned long attrs)
+void arch_sync_dma_for_device(struct device *dev, phys_addr_t paddr,
+		size_t size, enum dma_data_direction dir)
 {
-	struct scatterlist *s;
-	int i;
-
-	for_each_sg(sg, s, nents, i)
-		s->dma_address = dma_map_page(dev, sg_page(s), s->offset,
-					       s->length, dir);
-
-	return nents;
+	dma_cache_wback(paddr, size);
 }
 
-static void arc_dma_sync_single_for_cpu(struct device *dev,
-		dma_addr_t dma_handle, size_t size, enum dma_data_direction dir)
+void arch_sync_dma_for_cpu(struct device *dev, phys_addr_t paddr,
+		size_t size, enum dma_data_direction dir)
 {
-	_dma_cache_sync(plat_dma_to_phys(dev, dma_handle), size, DMA_FROM_DEVICE);
+	dma_cache_inv(paddr, size);
 }
-
-static void arc_dma_sync_single_for_device(struct device *dev,
-		dma_addr_t dma_handle, size_t size, enum dma_data_direction dir)
-{
-	_dma_cache_sync(plat_dma_to_phys(dev, dma_handle), size, DMA_TO_DEVICE);
-}
-
-static void arc_dma_sync_sg_for_cpu(struct device *dev,
-		struct scatterlist *sglist, int nelems,
-		enum dma_data_direction dir)
-{
-	int i;
-	struct scatterlist *sg;
-
-	for_each_sg(sglist, sg, nelems, i)
-		_dma_cache_sync(sg_phys(sg), sg->length, dir);
-}
-
-static void arc_dma_sync_sg_for_device(struct device *dev,
-		struct scatterlist *sglist, int nelems,
-		enum dma_data_direction dir)
-{
-	int i;
-	struct scatterlist *sg;
-
-	for_each_sg(sglist, sg, nelems, i)
-		_dma_cache_sync(sg_phys(sg), sg->length, dir);
-}
-
-static int arc_dma_supported(struct device *dev, u64 dma_mask)
-{
-	/* Support 32 bit DMA mask exclusively */
-	return dma_mask == DMA_BIT_MASK(32);
-}
-
-struct dma_map_ops arc_dma_ops = {
-	.alloc			= arc_dma_alloc,
-	.free			= arc_dma_free,
-	.map_page		= arc_dma_map_page,
-	.map_sg			= arc_dma_map_sg,
-	.sync_single_for_device	= arc_dma_sync_single_for_device,
-	.sync_single_for_cpu	= arc_dma_sync_single_for_cpu,
-	.sync_sg_for_cpu	= arc_dma_sync_sg_for_cpu,
-	.sync_sg_for_device	= arc_dma_sync_sg_for_device,
-	.dma_supported		= arc_dma_supported,
-};
-EXPORT_SYMBOL(arc_dma_ops);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -78,7 +79,7 @@
 /**
  * return cpumask of CPU partition \a cpt
  */
-cpumask_t *cfs_cpt_cpumask(struct cfs_cpt_table *cptab, int cpt);
+cpumask_var_t *cfs_cpt_cpumask(struct cfs_cpt_table *cptab, int cpt);
 /**
  * print string information of cpt-table
  */
@@ -92,10 +93,10 @@ struct cfs_cpt_table {
 	/* node mask */
 	nodemask_t		ctb_nodemask;
 	/* version */
-	__u64			ctb_version;
+	u64			ctb_version;
 };
 
-static inline cpumask_t *
+static inline cpumask_var_t *
 cfs_cpt_cpumask(struct cfs_cpt_table *cptab, int cpt)
 {
 	return NULL;
@@ -211,7 +212,7 @@ int cfs_cpu_ht_nsiblings(int cpu);
  */
 void *cfs_percpt_alloc(struct cfs_cpt_table *cptab, unsigned int size);
 /*
- * destory per-cpu-partition variable
+ * destroy per-cpu-partition variable
  */
 void cfs_percpt_free(void *vars);
 int cfs_percpt_number(void *vars);

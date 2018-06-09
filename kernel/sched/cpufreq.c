@@ -8,7 +8,6 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-
 #include "sched.h"
 
 DEFINE_PER_CPU(struct update_util_data *, cpufreq_update_util_data);
@@ -33,7 +32,7 @@ DEFINE_PER_CPU(struct update_util_data *, cpufreq_update_util_data);
  */
 void cpufreq_add_update_util_hook(int cpu, struct update_util_data *data,
 			void (*func)(struct update_util_data *data, u64 time,
-				     unsigned long util, unsigned long max))
+				     unsigned int flags))
 {
 	if (WARN_ON(!data || !func))
 		return;

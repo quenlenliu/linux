@@ -1,10 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _PROBE_EVENT_H
 #define _PROBE_EVENT_H
 
+#include <linux/compiler.h>
 #include <stdbool.h>
 #include "intlist.h"
-#include "strlist.h"
-#include "strfilter.h"
+#include "namespaces.h"
 
 /* Probe related configurations */
 struct probe_conf {
@@ -17,6 +18,8 @@ struct probe_conf {
 };
 extern struct probe_conf probe_conf;
 extern bool probe_event_dry_run;
+
+struct symbol;
 
 /* kprobe-tracer and uprobe-tracer tracing point */
 struct probe_trace_point {
@@ -91,6 +94,7 @@ struct perf_probe_event {
 	struct perf_probe_arg	*args;	/* Arguments */
 	struct probe_trace_event *tevs;
 	int			ntevs;
+	struct nsinfo		*nsi;	/* Target namespace */
 };
 
 /* Line range */
@@ -104,6 +108,8 @@ struct line_range {
 	char			*comp_dir;	/* Compile directory */
 	struct intlist		*line_list;	/* Visible lines */
 };
+
+struct strlist;
 
 /* List of variables */
 struct variable_list {
@@ -128,6 +134,8 @@ char *synthesize_perf_probe_point(struct perf_probe_point *pp);
 int perf_probe_event__copy(struct perf_probe_event *dst,
 			   struct perf_probe_event *src);
 
+bool perf_probe_with_var(struct perf_probe_event *pev);
+
 /* Check the perf_probe_event needs debuginfo */
 bool perf_probe_event_need_dwarf(struct perf_probe_event *pev);
 
@@ -147,24 +155,29 @@ int line_range__init(struct line_range *lr);
 int add_perf_probe_events(struct perf_probe_event *pevs, int npevs);
 int convert_perf_probe_events(struct perf_probe_event *pevs, int npevs);
 int apply_perf_probe_events(struct perf_probe_event *pevs, int npevs);
+int show_probe_trace_events(struct perf_probe_event *pevs, int npevs);
 void cleanup_perf_probe_events(struct perf_probe_event *pevs, int npevs);
+
+struct strfilter;
+
 int del_perf_probe_events(struct strfilter *filter);
 
 int show_perf_probe_event(const char *group, const char *event,
 			  struct perf_probe_event *pev,
 			  const char *module, bool use_stdout);
 int show_perf_probe_events(struct strfilter *filter);
-int show_line_range(struct line_range *lr, const char *module, bool user);
+int show_line_range(struct line_range *lr, const char *module,
+		    struct nsinfo *nsi, bool user);
 int show_available_vars(struct perf_probe_event *pevs, int npevs,
 			struct strfilter *filter);
-int show_available_funcs(const char *module, struct strfilter *filter, bool user);
+int show_available_funcs(const char *module, struct nsinfo *nsi,
+			 struct strfilter *filter, bool user);
 void arch__fix_tev_from_maps(struct perf_probe_event *pev,
 			     struct probe_trace_event *tev, struct map *map,
 			     struct symbol *sym);
 
 /* If there is no space to write, returns -E2BIG. */
-int e_snprintf(char *str, size_t size, const char *format, ...)
-	__attribute__((format(printf, 3, 4)));
+int e_snprintf(char *str, size_t size, const char *format, ...) __printf(3, 4);
 
 /* Maximum index number of event-name postfix */
 #define MAX_EVENT_INDEX	1024
@@ -172,7 +185,7 @@ int e_snprintf(char *str, size_t size, const char *format, ...)
 int copy_to_probe_trace_arg(struct probe_trace_arg *tvar,
 			    struct perf_probe_arg *pvar);
 
-struct map *get_target_map(const char *target, bool user);
+struct map *get_target_map(const char *target, struct nsinfo *nsi, bool user);
 
 void arch__post_process_probe_trace_events(struct perf_probe_event *pev,
 					   int ntevs);

@@ -69,7 +69,7 @@ struct codel_sched_data {
 static struct sk_buff *dequeue_func(struct codel_vars *vars, void *ctx)
 {
 	struct Qdisc *sch = ctx;
-	struct sk_buff *skb = __skb_dequeue(&sch->q);
+	struct sk_buff *skb = __qdisc_dequeue_head(&sch->q);
 
 	if (skb)
 		sch->qstats.backlog -= qdisc_pkt_len(skb);
@@ -130,7 +130,8 @@ static const struct nla_policy codel_policy[TCA_CODEL_MAX + 1] = {
 	[TCA_CODEL_CE_THRESHOLD]= { .type = NLA_U32 },
 };
 
-static int codel_change(struct Qdisc *sch, struct nlattr *opt)
+static int codel_change(struct Qdisc *sch, struct nlattr *opt,
+			struct netlink_ext_ack *extack)
 {
 	struct codel_sched_data *q = qdisc_priv(sch);
 	struct nlattr *tb[TCA_CODEL_MAX + 1];
@@ -140,7 +141,7 @@ static int codel_change(struct Qdisc *sch, struct nlattr *opt)
 	if (!opt)
 		return -EINVAL;
 
-	err = nla_parse_nested(tb, TCA_CODEL_MAX, opt, codel_policy);
+	err = nla_parse_nested(tb, TCA_CODEL_MAX, opt, codel_policy, NULL);
 	if (err < 0)
 		return err;
 
@@ -172,7 +173,7 @@ static int codel_change(struct Qdisc *sch, struct nlattr *opt)
 
 	qlen = sch->q.qlen;
 	while (sch->q.qlen > sch->limit) {
-		struct sk_buff *skb = __skb_dequeue(&sch->q);
+		struct sk_buff *skb = __qdisc_dequeue_head(&sch->q);
 
 		dropped += qdisc_pkt_len(skb);
 		qdisc_qstats_backlog_dec(sch, skb);
@@ -184,7 +185,8 @@ static int codel_change(struct Qdisc *sch, struct nlattr *opt)
 	return 0;
 }
 
-static int codel_init(struct Qdisc *sch, struct nlattr *opt)
+static int codel_init(struct Qdisc *sch, struct nlattr *opt,
+		      struct netlink_ext_ack *extack)
 {
 	struct codel_sched_data *q = qdisc_priv(sch);
 
@@ -196,7 +198,7 @@ static int codel_init(struct Qdisc *sch, struct nlattr *opt)
 	q->params.mtu = psched_mtu(qdisc_dev(sch));
 
 	if (opt) {
-		int err = codel_change(sch, opt);
+		int err = codel_change(sch, opt, extack);
 
 		if (err)
 			return err;

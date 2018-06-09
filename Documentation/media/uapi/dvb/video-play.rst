@@ -11,11 +11,13 @@ Name
 
 VIDEO_PLAY
 
+.. attention:: This ioctl is deprecated.
 
 Synopsis
 --------
 
-.. cpp:function:: int ioctl(fd, int request = VIDEO_PLAY)
+.. c:function:: int ioctl(fd, VIDEO_PLAY)
+    :name: VIDEO_PLAY
 
 
 Arguments
@@ -42,7 +44,7 @@ Arguments
 Description
 -----------
 
-This ioctl is for DVB devices only. To control a V4L2 decoder use the
+This ioctl is for Digital TV devices only. To control a V4L2 decoder use the
 V4L2 :ref:`VIDIOC_DECODER_CMD` instead.
 
 This ioctl call asks the Video Device to start playing a video stream

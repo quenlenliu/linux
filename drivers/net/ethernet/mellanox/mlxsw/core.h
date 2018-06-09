@@ -48,20 +48,16 @@
 
 #include "trap.h"
 #include "reg.h"
-
 #include "cmd.h"
-
-#define MLXSW_MODULE_ALIAS_PREFIX "mlxsw-driver-"
-#define MODULE_MLXSW_DRIVER_ALIAS(kind)	\
-	MODULE_ALIAS(MLXSW_MODULE_ALIAS_PREFIX kind)
-
-#define MLXSW_DEVICE_KIND_SWITCHX2 "switchx2"
-#define MLXSW_DEVICE_KIND_SPECTRUM "spectrum"
+#include "resources.h"
 
 struct mlxsw_core;
+struct mlxsw_core_port;
 struct mlxsw_driver;
 struct mlxsw_bus;
 struct mlxsw_bus_info;
+
+unsigned int mlxsw_core_max_ports(const struct mlxsw_core *mlxsw_core);
 
 void *mlxsw_core_driver_priv(struct mlxsw_core *mlxsw_core);
 
@@ -70,8 +66,9 @@ void mlxsw_core_driver_unregister(struct mlxsw_driver *mlxsw_driver);
 
 int mlxsw_core_bus_device_register(const struct mlxsw_bus_info *mlxsw_bus_info,
 				   const struct mlxsw_bus *mlxsw_bus,
-				   void *bus_priv);
-void mlxsw_core_bus_device_unregister(struct mlxsw_core *mlxsw_core);
+				   void *bus_priv, bool reload,
+				   struct devlink *devlink);
+void mlxsw_core_bus_device_unregister(struct mlxsw_core *mlxsw_core, bool reload);
 
 struct mlxsw_tx_info {
 	u8 local_port;
@@ -87,6 +84,7 @@ struct mlxsw_rx_listener {
 	void (*func)(struct sk_buff *skb, u8 local_port, void *priv);
 	u8 local_port;
 	u16 trap_id;
+	enum mlxsw_reg_hpkt_action action;
 };
 
 struct mlxsw_event_listener {
@@ -94,6 +92,50 @@ struct mlxsw_event_listener {
 		     char *payload, void *priv);
 	enum mlxsw_event_trap_id trap_id;
 };
+
+struct mlxsw_listener {
+	u16 trap_id;
+	union {
+		struct mlxsw_rx_listener rx_listener;
+		struct mlxsw_event_listener event_listener;
+	} u;
+	enum mlxsw_reg_hpkt_action action;
+	enum mlxsw_reg_hpkt_action unreg_action;
+	u8 trap_group;
+	bool is_ctrl; /* should go via control buffer or not */
+	bool is_event;
+};
+
+#define MLXSW_RXL(_func, _trap_id, _action, _is_ctrl, _trap_group,	\
+		  _unreg_action)					\
+	{								\
+		.trap_id = MLXSW_TRAP_ID_##_trap_id,			\
+		.u.rx_listener =					\
+		{							\
+			.func = _func,					\
+			.local_port = MLXSW_PORT_DONT_CARE,		\
+			.trap_id = MLXSW_TRAP_ID_##_trap_id,		\
+		},							\
+		.action = MLXSW_REG_HPKT_ACTION_##_action,		\
+		.unreg_action = MLXSW_REG_HPKT_ACTION_##_unreg_action,	\
+		.trap_group = MLXSW_REG_HTGT_TRAP_GROUP_##_trap_group,	\
+		.is_ctrl = _is_ctrl,					\
+		.is_event = false,					\
+	}
+
+#define MLXSW_EVENTL(_func, _trap_id, _trap_group)			\
+	{								\
+		.trap_id = MLXSW_TRAP_ID_##_trap_id,			\
+		.u.event_listener =					\
+		{							\
+			.func = _func,					\
+			.trap_id = MLXSW_TRAP_ID_##_trap_id,		\
+		},							\
+		.action = MLXSW_REG_HPKT_ACTION_TRAP_TO_CPU,		\
+		.trap_group = MLXSW_REG_HTGT_TRAP_GROUP_##_trap_group,	\
+		.is_ctrl = false,					\
+		.is_event = true,					\
+	}
 
 int mlxsw_core_rx_listener_register(struct mlxsw_core *mlxsw_core,
 				    const struct mlxsw_rx_listener *rxl,
@@ -108,6 +150,13 @@ int mlxsw_core_event_listener_register(struct mlxsw_core *mlxsw_core,
 void mlxsw_core_event_listener_unregister(struct mlxsw_core *mlxsw_core,
 					  const struct mlxsw_event_listener *el,
 					  void *priv);
+
+int mlxsw_core_trap_register(struct mlxsw_core *mlxsw_core,
+			     const struct mlxsw_listener *listener,
+			     void *priv);
+void mlxsw_core_trap_unregister(struct mlxsw_core *mlxsw_core,
+				const struct mlxsw_listener *listener,
+				void *priv);
 
 typedef void mlxsw_reg_trans_cb_t(struct mlxsw_core *mlxsw_core, char *payload,
 				  size_t payload_len, unsigned long cb_priv);
@@ -147,25 +196,25 @@ u8 mlxsw_core_lag_mapping_get(struct mlxsw_core *mlxsw_core,
 void mlxsw_core_lag_mapping_clear(struct mlxsw_core *mlxsw_core,
 				  u16 lag_id, u8 local_port);
 
-struct mlxsw_core_port {
-	struct devlink_port devlink_port;
-};
-
-static inline void *
-mlxsw_core_port_driver_priv(struct mlxsw_core_port *mlxsw_core_port)
-{
-	/* mlxsw_core_port is ensured to always be the first field in driver
-	 * port structure.
-	 */
-	return mlxsw_core_port;
-}
-
-int mlxsw_core_port_init(struct mlxsw_core *mlxsw_core,
-			 struct mlxsw_core_port *mlxsw_core_port, u8 local_port,
-			 struct net_device *dev, bool split, u32 split_group);
-void mlxsw_core_port_fini(struct mlxsw_core_port *mlxsw_core_port);
+void *mlxsw_core_port_driver_priv(struct mlxsw_core_port *mlxsw_core_port);
+int mlxsw_core_port_init(struct mlxsw_core *mlxsw_core, u8 local_port);
+void mlxsw_core_port_fini(struct mlxsw_core *mlxsw_core, u8 local_port);
+void mlxsw_core_port_eth_set(struct mlxsw_core *mlxsw_core, u8 local_port,
+			     void *port_driver_priv, struct net_device *dev,
+			     u32 port_number, bool split,
+			     u32 split_port_subnumber);
+void mlxsw_core_port_ib_set(struct mlxsw_core *mlxsw_core, u8 local_port,
+			    void *port_driver_priv);
+void mlxsw_core_port_clear(struct mlxsw_core *mlxsw_core, u8 local_port,
+			   void *port_driver_priv);
+enum devlink_port_type mlxsw_core_port_type_get(struct mlxsw_core *mlxsw_core,
+						u8 local_port);
+int mlxsw_core_port_get_phys_port_name(struct mlxsw_core *mlxsw_core,
+				       u8 local_port, char *name, size_t len);
 
 int mlxsw_core_schedule_dw(struct delayed_work *dwork, unsigned long delay);
+bool mlxsw_core_schedule_work(struct work_struct *work);
+void mlxsw_core_flush_owq(void);
 
 #define MLXSW_CONFIG_PROFILE_SWID_COUNT 8
 
@@ -178,8 +227,6 @@ struct mlxsw_swid_config {
 
 struct mlxsw_config_profile {
 	u16	used_max_vepa_channels:1,
-		used_max_lag:1,
-		used_max_port_per_lag:1,
 		used_max_mid:1,
 		used_max_pgt:1,
 		used_max_system_port:1,
@@ -193,8 +240,6 @@ struct mlxsw_config_profile {
 		used_adaptive_routing_group_cap:1,
 		used_kvd_sizes:1;
 	u8	max_vepa_channels;
-	u16	max_lag;
-	u16	max_port_per_lag;
 	u16	max_mid;
 	u16	max_pgt;
 	u16	max_system_port;
@@ -213,23 +258,25 @@ struct mlxsw_config_profile {
 	u16	adaptive_routing_group_cap;
 	u8	arn;
 	u32	kvd_linear_size;
-	u32	kvd_hash_single_size;
-	u32	kvd_hash_double_size;
-	u8	resource_query_enable;
+	u8	kvd_hash_single_parts;
+	u8	kvd_hash_double_parts;
 	struct mlxsw_swid_config swid_config[MLXSW_CONFIG_PROFILE_SWID_COUNT];
 };
 
 struct mlxsw_driver {
 	struct list_head list;
 	const char *kind;
-	struct module *owner;
 	size_t priv_size;
 	int (*init)(struct mlxsw_core *mlxsw_core,
 		    const struct mlxsw_bus_info *mlxsw_bus_info);
 	void (*fini)(struct mlxsw_core *mlxsw_core);
+	int (*basic_trap_groups_set)(struct mlxsw_core *mlxsw_core);
+	int (*port_type_set)(struct mlxsw_core *mlxsw_core, u8 local_port,
+			     enum devlink_port_type new_type);
 	int (*port_split)(struct mlxsw_core *mlxsw_core, u8 local_port,
-			  unsigned int count);
-	int (*port_unsplit)(struct mlxsw_core *mlxsw_core, u8 local_port);
+			  unsigned int count, struct netlink_ext_ack *extack);
+	int (*port_unsplit)(struct mlxsw_core *mlxsw_core, u8 local_port,
+			    struct netlink_ext_ack *extack);
 	int (*sb_pool_get)(struct mlxsw_core *mlxsw_core,
 			   unsigned int sb_index, u16 pool_index,
 			   struct devlink_sb_pool_info *pool_info);
@@ -263,22 +310,41 @@ struct mlxsw_driver {
 				       u32 *p_cur, u32 *p_max);
 	void (*txhdr_construct)(struct sk_buff *skb,
 				const struct mlxsw_tx_info *tx_info);
+	int (*resources_register)(struct mlxsw_core *mlxsw_core);
+	int (*kvd_sizes_get)(struct mlxsw_core *mlxsw_core,
+			     const struct mlxsw_config_profile *profile,
+			     u64 *p_single_size, u64 *p_double_size,
+			     u64 *p_linear_size);
 	u8 txhdr_len;
 	const struct mlxsw_config_profile *profile;
+	bool res_query_enabled;
 };
 
-struct mlxsw_resources {
-	u8	max_span_valid:1;
-	u8      max_span;
-};
+int mlxsw_core_kvd_sizes_get(struct mlxsw_core *mlxsw_core,
+			     const struct mlxsw_config_profile *profile,
+			     u64 *p_single_size, u64 *p_double_size,
+			     u64 *p_linear_size);
 
-struct mlxsw_resources *mlxsw_core_resources_get(struct mlxsw_core *mlxsw_core);
+bool mlxsw_core_res_valid(struct mlxsw_core *mlxsw_core,
+			  enum mlxsw_res_id res_id);
+
+#define MLXSW_CORE_RES_VALID(mlxsw_core, short_res_id)			\
+	mlxsw_core_res_valid(mlxsw_core, MLXSW_RES_ID_##short_res_id)
+
+u64 mlxsw_core_res_get(struct mlxsw_core *mlxsw_core,
+		       enum mlxsw_res_id res_id);
+
+#define MLXSW_CORE_RES_GET(mlxsw_core, short_res_id)			\
+	mlxsw_core_res_get(mlxsw_core, MLXSW_RES_ID_##short_res_id)
+
+#define MLXSW_BUS_F_TXRX	BIT(0)
+#define MLXSW_BUS_F_RESET	BIT(1)
 
 struct mlxsw_bus {
 	const char *kind;
 	int (*init)(void *bus_priv, struct mlxsw_core *mlxsw_core,
 		    const struct mlxsw_config_profile *profile,
-		    struct mlxsw_resources *resources);
+		    struct mlxsw_res *res);
 	void (*fini)(void *bus_priv);
 	bool (*skb_transmit_busy)(void *bus_priv,
 				  const struct mlxsw_tx_info *tx_info);
@@ -289,17 +355,20 @@ struct mlxsw_bus {
 			char *in_mbox, size_t in_mbox_size,
 			char *out_mbox, size_t out_mbox_size,
 			u8 *p_status);
+	u8 features;
+};
+
+struct mlxsw_fw_rev {
+	u16 major;
+	u16 minor;
+	u16 subminor;
 };
 
 struct mlxsw_bus_info {
 	const char *device_kind;
 	const char *device_name;
 	struct device *dev;
-	struct {
-		u16 major;
-		u16 minor;
-		u16 subminor;
-	} fw_rev;
+	struct mlxsw_fw_rev fw_rev;
 	u8 vsd[MLXSW_CMD_BOARDINFO_VSD_LEN];
 	u8 psid[MLXSW_CMD_BOARDINFO_PSID_LEN];
 };
@@ -320,6 +389,30 @@ static inline int mlxsw_hwmon_init(struct mlxsw_core *mlxsw_core,
 				   struct mlxsw_hwmon **p_hwmon)
 {
 	return 0;
+}
+
+#endif
+
+struct mlxsw_thermal;
+
+#ifdef CONFIG_MLXSW_CORE_THERMAL
+
+int mlxsw_thermal_init(struct mlxsw_core *mlxsw_core,
+		       const struct mlxsw_bus_info *mlxsw_bus_info,
+		       struct mlxsw_thermal **p_thermal);
+void mlxsw_thermal_fini(struct mlxsw_thermal *thermal);
+
+#else
+
+static inline int mlxsw_thermal_init(struct mlxsw_core *mlxsw_core,
+				     const struct mlxsw_bus_info *mlxsw_bus_info,
+				     struct mlxsw_thermal **p_thermal)
+{
+	return 0;
+}
+
+static inline void mlxsw_thermal_fini(struct mlxsw_thermal *thermal)
+{
 }
 
 #endif

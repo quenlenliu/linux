@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -37,28 +38,29 @@
 #include <asm/div64.h>
 #include <linux/seq_file.h>
 
-#include "../include/obd_support.h"
-#include "../include/lustre/lustre_idl.h"
-#include "../include/lustre_fid.h"
-#include "../include/lustre_lib.h"
-#include "../include/lustre_net.h"
-#include "../include/lustre_dlm.h"
-#include "../include/obd_class.h"
-#include "../include/lprocfs_status.h"
+#include <obd_support.h>
+#include <lustre_fid.h>
+#include <lustre_lib.h>
+#include <lustre_net.h>
+#include <lustre_dlm.h>
+#include <obd_class.h>
+#include <lprocfs_status.h>
 #include "lmv_internal.h"
 
-int lmv_fld_lookup(struct lmv_obd *lmv,
-		   const struct lu_fid *fid,
-		   u32 *mds)
+int lmv_fld_lookup(struct lmv_obd *lmv, const struct lu_fid *fid, u32 *mds)
 {
+	struct obd_device *obd = lmv2obd_dev(lmv);
 	int rc;
 
-	/* FIXME: Currently ZFS still use local seq for ROOT unfortunately, and
+	/*
+	 * FIXME: Currently ZFS still use local seq for ROOT unfortunately, and
 	 * this fid_is_local check should be removed once LU-2240 is fixed
 	 */
-	LASSERTF((fid_seq_in_fldb(fid_seq(fid)) ||
-		  fid_seq_is_local_file(fid_seq(fid))) &&
-		 fid_is_sane(fid), DFID" is insane!\n", PFID(fid));
+	if (!fid_is_sane(fid) || !(fid_seq_in_fldb(fid_seq(fid)) ||
+				   fid_seq_is_local_file(fid_seq(fid)))) {
+		CERROR("%s: invalid FID " DFID "\n", obd->obd_name, PFID(fid));
+		return -EINVAL;
+	}
 
 	rc = fld_client_lookup(&lmv->lmv_fld, fid_seq(fid), mds,
 			       LU_SEQ_RANGE_MDT, NULL);
@@ -68,7 +70,7 @@ int lmv_fld_lookup(struct lmv_obd *lmv,
 		return rc;
 	}
 
-	CDEBUG(D_INODE, "FLD lookup got mds #%x for fid="DFID"\n",
+	CDEBUG(D_INODE, "FLD lookup got mds #%x for fid=" DFID "\n",
 	       *mds, PFID(fid));
 
 	if (*mds >= lmv->desc.ld_tgt_count) {

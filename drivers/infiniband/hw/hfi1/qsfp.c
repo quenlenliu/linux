@@ -161,7 +161,7 @@ static struct hfi1_i2c_bus *init_i2c_bus(struct hfi1_devdata *dd,
 	bus->algo.getsda = hfi1_getsda;
 	bus->algo.getscl = hfi1_getscl;
 	bus->algo.udelay = 5;
-	bus->algo.timeout = usecs_to_jiffies(50);
+	bus->algo.timeout = usecs_to_jiffies(100000);
 	bus->algo.data = bus;
 
 	bus->adapter.owner = THIS_MODULE;
@@ -204,6 +204,8 @@ static void clean_i2c_bus(struct hfi1_i2c_bus *bus)
 
 void clean_up_i2c(struct hfi1_devdata *dd, struct hfi1_asic_data *ad)
 {
+	if (!ad)
+		return;
 	clean_i2c_bus(ad->i2c_bus0);
 	ad->i2c_bus0 = NULL;
 	clean_i2c_bus(ad->i2c_bus1);

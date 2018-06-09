@@ -26,8 +26,9 @@
  * Authors: Dave Airlie <airlied@redhat.com>
  */
 #include <drm/drmP.h>
+#include <drm/ttm/ttm_page_alloc.h>
+
 #include "ast_drv.h"
-#include <ttm/ttm_page_alloc.h>
 
 static inline struct ast_private *
 ast_bdev(struct ttm_bo_device *bd)
@@ -150,7 +151,8 @@ static int ast_bo_verify_access(struct ttm_buffer_object *bo, struct file *filp)
 {
 	struct ast_bo *astbo = ast_bo(bo);
 
-	return drm_vma_node_verify_access(&astbo->gem.vma_node, filp);
+	return drm_vma_node_verify_access(&astbo->gem.vma_node,
+					  filp->private_data);
 }
 
 static int ast_ttm_io_mem_reserve(struct ttm_bo_device *bdev,
@@ -197,9 +199,8 @@ static struct ttm_backend_func ast_tt_backend_func = {
 };
 
 
-static struct ttm_tt *ast_ttm_tt_create(struct ttm_bo_device *bdev,
-				 unsigned long size, uint32_t page_flags,
-				 struct page *dummy_read_page)
+static struct ttm_tt *ast_ttm_tt_create(struct ttm_buffer_object *bo,
+					uint32_t page_flags)
 {
 	struct ttm_tt *tt;
 
@@ -207,35 +208,22 @@ static struct ttm_tt *ast_ttm_tt_create(struct ttm_bo_device *bdev,
 	if (tt == NULL)
 		return NULL;
 	tt->func = &ast_tt_backend_func;
-	if (ttm_tt_init(tt, bdev, size, page_flags, dummy_read_page)) {
+	if (ttm_tt_init(tt, bo, page_flags)) {
 		kfree(tt);
 		return NULL;
 	}
 	return tt;
 }
 
-static int ast_ttm_tt_populate(struct ttm_tt *ttm)
-{
-	return ttm_pool_populate(ttm);
-}
-
-static void ast_ttm_tt_unpopulate(struct ttm_tt *ttm)
-{
-	ttm_pool_unpopulate(ttm);
-}
-
 struct ttm_bo_driver ast_bo_driver = {
 	.ttm_tt_create = ast_ttm_tt_create,
-	.ttm_tt_populate = ast_ttm_tt_populate,
-	.ttm_tt_unpopulate = ast_ttm_tt_unpopulate,
 	.init_mem_type = ast_bo_init_mem_type,
+	.eviction_valuable = ttm_bo_eviction_valuable,
 	.evict_flags = ast_bo_evict_flags,
 	.move = NULL,
 	.verify_access = ast_bo_verify_access,
 	.io_mem_reserve = &ast_ttm_io_mem_reserve,
 	.io_mem_free = &ast_ttm_io_mem_free,
-	.lru_tail = &ttm_bo_default_lru_tail,
-	.swap_lru_tail = &ttm_bo_default_swap_lru_tail,
 };
 
 int ast_mm_init(struct ast_private *ast)
@@ -266,6 +254,8 @@ int ast_mm_init(struct ast_private *ast)
 		return ret;
 	}
 
+	arch_io_reserve_memtype_wc(pci_resource_start(dev->pdev, 0),
+				   pci_resource_len(dev->pdev, 0));
 	ast->fb_mtrr = arch_phys_wc_add(pci_resource_start(dev->pdev, 0),
 					pci_resource_len(dev->pdev, 0));
 
@@ -274,11 +264,15 @@ int ast_mm_init(struct ast_private *ast)
 
 void ast_mm_fini(struct ast_private *ast)
 {
+	struct drm_device *dev = ast->dev;
+
 	ttm_bo_device_release(&ast->ttm.bdev);
 
 	ast_ttm_global_release(ast);
 
 	arch_phys_wc_del(ast->fb_mtrr);
+	arch_io_free_memtype_wc(pci_resource_start(dev->pdev, 0),
+				pci_resource_len(dev->pdev, 0));
 }
 
 void ast_ttm_placement(struct ast_bo *bo, int domain)
@@ -315,10 +309,8 @@ int ast_bo_create(struct drm_device *dev, int size, int align,
 		return -ENOMEM;
 
 	ret = drm_gem_object_init(dev, &astbo->gem, size);
-	if (ret) {
-		kfree(astbo);
-		return ret;
-	}
+	if (ret)
+		goto error;
 
 	astbo->bo.bdev = &ast->ttm.bdev;
 
@@ -329,13 +321,16 @@ int ast_bo_create(struct drm_device *dev, int size, int align,
 
 	ret = ttm_bo_init(&ast->ttm.bdev, &astbo->bo, size,
 			  ttm_bo_type_device, &astbo->placement,
-			  align >> PAGE_SHIFT, false, NULL, acc_size,
+			  align >> PAGE_SHIFT, false, acc_size,
 			  NULL, NULL, ast_bo_ttm_destroy);
 	if (ret)
-		return ret;
+		goto error;
 
 	*pastbo = astbo;
 	return 0;
+error:
+	kfree(astbo);
+	return ret;
 }
 
 static inline u64 ast_bo_gpu_offset(struct ast_bo *bo)
@@ -345,6 +340,7 @@ static inline u64 ast_bo_gpu_offset(struct ast_bo *bo)
 
 int ast_bo_pin(struct ast_bo *bo, u32 pl_flag, u64 *gpu_addr)
 {
+	struct ttm_operation_ctx ctx = { false, false };
 	int i, ret;
 
 	if (bo->pin_count) {
@@ -356,7 +352,7 @@ int ast_bo_pin(struct ast_bo *bo, u32 pl_flag, u64 *gpu_addr)
 	ast_ttm_placement(bo, pl_flag);
 	for (i = 0; i < bo->placement.num_placement; i++)
 		bo->placements[i].flags |= TTM_PL_FLAG_NO_EVICT;
-	ret = ttm_bo_validate(&bo->bo, &bo->placement, false, false);
+	ret = ttm_bo_validate(&bo->bo, &bo->placement, &ctx);
 	if (ret)
 		return ret;
 
@@ -368,7 +364,8 @@ int ast_bo_pin(struct ast_bo *bo, u32 pl_flag, u64 *gpu_addr)
 
 int ast_bo_unpin(struct ast_bo *bo)
 {
-	int i, ret;
+	struct ttm_operation_ctx ctx = { false, false };
+	int i;
 	if (!bo->pin_count) {
 		DRM_ERROR("unpin bad %p\n", bo);
 		return 0;
@@ -379,15 +376,12 @@ int ast_bo_unpin(struct ast_bo *bo)
 
 	for (i = 0; i < bo->placement.num_placement ; i++)
 		bo->placements[i].flags &= ~TTM_PL_FLAG_NO_EVICT;
-	ret = ttm_bo_validate(&bo->bo, &bo->placement, false, false);
-	if (ret)
-		return ret;
-
-	return 0;
+	return ttm_bo_validate(&bo->bo, &bo->placement, &ctx);
 }
 
 int ast_bo_push_sysram(struct ast_bo *bo)
 {
+	struct ttm_operation_ctx ctx = { false, false };
 	int i, ret;
 	if (!bo->pin_count) {
 		DRM_ERROR("unpin bad %p\n", bo);
@@ -404,7 +398,7 @@ int ast_bo_push_sysram(struct ast_bo *bo)
 	for (i = 0; i < bo->placement.num_placement ; i++)
 		bo->placements[i].flags |= TTM_PL_FLAG_NO_EVICT;
 
-	ret = ttm_bo_validate(&bo->bo, &bo->placement, false, false);
+	ret = ttm_bo_validate(&bo->bo, &bo->placement, &ctx);
 	if (ret) {
 		DRM_ERROR("pushing to VRAM failed\n");
 		return ret;

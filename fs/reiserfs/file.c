@@ -154,7 +154,7 @@ static int reiserfs_sync_file(struct file *filp, loff_t start, loff_t end,
 	int err;
 	int barrier_done;
 
-	err = filemap_write_and_wait_range(inode->i_mapping, start, end);
+	err = file_write_and_wait_range(filp, start, end);
 	if (err)
 		return err;
 
@@ -189,7 +189,7 @@ int reiserfs_commit_page(struct inode *inode, struct page *page,
 	int ret = 0;
 
 	th.t_trans_id = 0;
-	blocksize = 1 << inode->i_blkbits;
+	blocksize = i_blocksize(inode);
 
 	if (logit) {
 		reiserfs_write_lock(s);
@@ -260,10 +260,7 @@ const struct file_operations reiserfs_file_operations = {
 
 const struct inode_operations reiserfs_file_inode_operations = {
 	.setattr = reiserfs_setattr,
-	.setxattr = generic_setxattr,
-	.getxattr = generic_getxattr,
 	.listxattr = reiserfs_listxattr,
-	.removexattr = generic_removexattr,
 	.permission = reiserfs_permission,
 	.get_acl = reiserfs_get_acl,
 	.set_acl = reiserfs_set_acl,

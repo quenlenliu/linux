@@ -20,7 +20,9 @@ static const unsigned int one = 1;
 static const unsigned int four = 4;
 static const unsigned int thirtytwo = 32;
 static const unsigned int n_65535 = 65535;
-static const unsigned int n_max_acks = RXRPC_MAXACKS;
+static const unsigned int n_max_acks = RXRPC_RXTX_BUFF_SIZE - 1;
+static const unsigned long one_jiffy = 1;
+static const unsigned long max_jiffies = MAX_JIFFY_OFFSET;
 
 /*
  * RxRPC operating parameters.
@@ -29,69 +31,80 @@ static const unsigned int n_max_acks = RXRPC_MAXACKS;
  * information on the individual parameters.
  */
 static struct ctl_table rxrpc_sysctl_table[] = {
-	/* Values measured in milliseconds */
+	/* Values measured in milliseconds but used in jiffies */
 	{
 		.procname	= "req_ack_delay",
 		.data		= &rxrpc_requested_ack_delay,
-		.maxlen		= sizeof(unsigned int),
+		.maxlen		= sizeof(unsigned long),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec_ms_jiffies,
-		.extra1		= (void *)&zero,
+		.proc_handler	= proc_doulongvec_ms_jiffies_minmax,
+		.extra1		= (void *)&one_jiffy,
+		.extra2		= (void *)&max_jiffies,
 	},
 	{
 		.procname	= "soft_ack_delay",
 		.data		= &rxrpc_soft_ack_delay,
-		.maxlen		= sizeof(unsigned int),
+		.maxlen		= sizeof(unsigned long),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec_ms_jiffies,
-		.extra1		= (void *)&one,
+		.proc_handler	= proc_doulongvec_ms_jiffies_minmax,
+		.extra1		= (void *)&one_jiffy,
+		.extra2		= (void *)&max_jiffies,
 	},
 	{
 		.procname	= "idle_ack_delay",
 		.data		= &rxrpc_idle_ack_delay,
-		.maxlen		= sizeof(unsigned int),
+		.maxlen		= sizeof(unsigned long),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec_ms_jiffies,
-		.extra1		= (void *)&one,
+		.proc_handler	= proc_doulongvec_ms_jiffies_minmax,
+		.extra1		= (void *)&one_jiffy,
+		.extra2		= (void *)&max_jiffies,
+	},
+	{
+		.procname	= "idle_conn_expiry",
+		.data		= &rxrpc_conn_idle_client_expiry,
+		.maxlen		= sizeof(unsigned long),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_ms_jiffies_minmax,
+		.extra1		= (void *)&one_jiffy,
+		.extra2		= (void *)&max_jiffies,
+	},
+	{
+		.procname	= "idle_conn_fast_expiry",
+		.data		= &rxrpc_conn_idle_client_fast_expiry,
+		.maxlen		= sizeof(unsigned long),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_ms_jiffies_minmax,
+		.extra1		= (void *)&one_jiffy,
+		.extra2		= (void *)&max_jiffies,
 	},
 	{
 		.procname	= "resend_timeout",
 		.data		= &rxrpc_resend_timeout,
-		.maxlen		= sizeof(unsigned int),
+		.maxlen		= sizeof(unsigned long),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec_ms_jiffies,
-		.extra1		= (void *)&one,
+		.proc_handler	= proc_doulongvec_ms_jiffies_minmax,
+		.extra1		= (void *)&one_jiffy,
+		.extra2		= (void *)&max_jiffies,
 	},
 
-	/* Values measured in seconds but used in jiffies */
+	/* Non-time values */
 	{
-		.procname	= "max_call_lifetime",
-		.data		= &rxrpc_max_call_lifetime,
+		.procname	= "max_client_conns",
+		.data		= &rxrpc_max_client_connections,
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec_jiffies,
-		.extra1		= (void *)&one,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= (void *)&rxrpc_reap_client_connections,
 	},
 	{
-		.procname	= "dead_call_expiry",
-		.data		= &rxrpc_dead_call_expiry,
-		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_jiffies,
-		.extra1		= (void *)&one,
-	},
-
-	/* Values measured in seconds */
-	{
-		.procname	= "connection_expiry",
-		.data		= &rxrpc_connection_expiry,
+		.procname	= "reap_client_conns",
+		.data		= &rxrpc_reap_client_connections,
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= (void *)&one,
+		.extra2		= (void *)&rxrpc_max_client_connections,
 	},
-
-	/* Non-time values */
 	{
 		.procname	= "max_backlog",
 		.data		= &rxrpc_max_backlog,

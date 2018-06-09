@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _FS_NFSD_PNFS_H
 #define _FS_NFSD_PNFS_H 1
 
@@ -19,6 +20,7 @@ struct nfsd4_deviceid_map {
 
 struct nfsd4_layout_ops {
 	u32		notify_types;
+	bool		disable_recalls;
 
 	__be32 (*proc_getdeviceinfo)(struct super_block *sb,
 			struct svc_rqst *rqstp,

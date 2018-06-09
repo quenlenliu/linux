@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -43,12 +44,11 @@
  * @{
  */
 
-#include "lustre_handles.h"
-#include "../../include/linux/libcfs/libcfs.h"
-#include "lustre/lustre_idl.h"
-#include "lustre_lib.h"
-#include "lustre_dlm.h"
-#include "lustre_export.h"
+#include <lustre_handles.h>
+#include <linux/libcfs/libcfs.h>
+#include <lustre_lib.h>
+#include <lustre_dlm.h>
+#include <lustre_export.h>
 
 struct mds_group_info {
 	struct obd_uuid *uuid;
@@ -57,9 +57,6 @@ struct mds_group_info {
 
 #define MDD_OBD_NAME     "mdd_obd"
 #define MDD_OBD_UUID     "mdd_obd_uuid"
-
-/* these are local flags, used only on the client, private */
-#define M_CHECK_STALE	   0200000000
 
 /** @} mds */
 

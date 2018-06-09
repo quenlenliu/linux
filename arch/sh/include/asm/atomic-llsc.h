@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_SH_ATOMIC_LLSC_H
 #define __ASM_SH_ATOMIC_LLSC_H
 
@@ -60,7 +61,7 @@ static inline int atomic_fetch_##op(int i, atomic_t *v)			\
 "	movco.l	%0, @%3					\n"		\
 "	bf	1b					\n"		\
 "	synco						\n"		\
-	: "=&z" (temp), "=&z" (res)					\
+	: "=&z" (temp), "=&r" (res)					\
 	: "r" (i), "r" (&v->counter)					\
 	: "t");								\
 									\

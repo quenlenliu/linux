@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/jhash.h>
 #include <linux/netfilter.h>
 #include <linux/rcupdate.h>
@@ -41,13 +42,7 @@ static int alloc_ila_locks(struct ila_net *ilan)
 	size = roundup_pow_of_two(nr_pcpus * LOCKS_PER_CPU);
 
 	if (sizeof(spinlock_t) != 0) {
-#ifdef CONFIG_NUMA
-		if (size * sizeof(spinlock_t) > PAGE_SIZE)
-			ilan->locks = vmalloc(size * sizeof(spinlock_t));
-		else
-#endif
-		ilan->locks = kmalloc_array(size, sizeof(spinlock_t),
-					    GFP_KERNEL);
+		ilan->locks = kvmalloc(size * sizeof(spinlock_t), GFP_KERNEL);
 		if (!ilan->locks)
 			return -ENOMEM;
 		for (i = 0; i < size; i++)
@@ -68,6 +63,7 @@ static inline u32 ila_locator_hash(struct ila_locator loc)
 {
 	u32 *v = (u32 *)loc.v32;
 
+	__ila_hash_secret_init();
 	return jhash_2words(v[0], v[1], hashrnd);
 }
 
@@ -118,21 +114,14 @@ static const struct rhashtable_params rht_params = {
 	.obj_cmpfn = ila_cmpfn,
 };
 
-static struct genl_family ila_nl_family = {
-	.id		= GENL_ID_GENERATE,
-	.hdrsize	= 0,
-	.name		= ILA_GENL_NAME,
-	.version	= ILA_GENL_VERSION,
-	.maxattr	= ILA_ATTR_MAX,
-	.netnsok	= true,
-	.parallel_ops	= true,
-};
+static struct genl_family ila_nl_family;
 
-static struct nla_policy ila_nl_policy[ILA_ATTR_MAX + 1] = {
+static const struct nla_policy ila_nl_policy[ILA_ATTR_MAX + 1] = {
 	[ILA_ATTR_LOCATOR] = { .type = NLA_U64, },
 	[ILA_ATTR_LOCATOR_MATCH] = { .type = NLA_U64, },
 	[ILA_ATTR_IFINDEX] = { .type = NLA_U32, },
 	[ILA_ATTR_CSUM_MODE] = { .type = NLA_U8, },
+	[ILA_ATTR_IDENT_TYPE] = { .type = NLA_U8, },
 };
 
 static int parse_nl_config(struct genl_info *info,
@@ -150,6 +139,14 @@ static int parse_nl_config(struct genl_info *info,
 
 	if (info->attrs[ILA_ATTR_CSUM_MODE])
 		xp->ip.csum_mode = nla_get_u8(info->attrs[ILA_ATTR_CSUM_MODE]);
+	else
+		xp->ip.csum_mode = ILA_CSUM_NO_ACTION;
+
+	if (info->attrs[ILA_ATTR_IDENT_TYPE])
+		xp->ip.ident_type = nla_get_u8(
+				info->attrs[ILA_ATTR_IDENT_TYPE]);
+	else
+		xp->ip.ident_type = ILA_ATYPE_USE_FORMAT;
 
 	if (info->attrs[ILA_ATTR_IFINDEX])
 		xp->ifindex = nla_get_s32(info->attrs[ILA_ATTR_IFINDEX]);
@@ -210,7 +207,7 @@ static void ila_free_cb(void *ptr, void *arg)
 	}
 }
 
-static int ila_xlat_addr(struct sk_buff *skb, bool set_csum_neutral);
+static int ila_xlat_addr(struct sk_buff *skb, bool sir2ila);
 
 static unsigned int
 ila_nf_input(void *priv,
@@ -221,7 +218,7 @@ ila_nf_input(void *priv,
 	return NF_ACCEPT;
 }
 
-static struct nf_hook_ops ila_nf_hook_ops[] __read_mostly = {
+static const struct nf_hook_ops ila_nf_hook_ops[] = {
 	{
 		.hook = ila_nf_input,
 		.pf = NFPROTO_IPV6,
@@ -408,7 +405,8 @@ static int ila_fill_info(struct ila_map *ila, struct sk_buff *msg)
 			      (__force u64)ila->xp.ip.locator_match.v64,
 			      ILA_ATTR_PAD) ||
 	    nla_put_s32(msg, ILA_ATTR_IFINDEX, ila->xp.ifindex) ||
-	    nla_put_u32(msg, ILA_ATTR_CSUM_MODE, ila->xp.ip.csum_mode))
+	    nla_put_u8(msg, ILA_ATTR_CSUM_MODE, ila->xp.ip.csum_mode) ||
+	    nla_put_u8(msg, ILA_ATTR_IDENT_TYPE, ila->xp.ip.ident_type))
 		return -1;
 
 	return 0;
@@ -482,7 +480,15 @@ static int ila_nl_dump_start(struct netlink_callback *cb)
 {
 	struct net *net = sock_net(cb->skb->sk);
 	struct ila_net *ilan = net_generic(net, ila_net_id);
-	struct ila_dump_iter *iter = (struct ila_dump_iter *)cb->args;
+	struct ila_dump_iter *iter = (struct ila_dump_iter *)cb->args[0];
+
+	if (!iter) {
+		iter = kmalloc(sizeof(*iter), GFP_KERNEL);
+		if (!iter)
+			return -ENOMEM;
+
+		cb->args[0] = (long)iter;
+	}
 
 	return rhashtable_walk_init(&ilan->rhash_table, &iter->rhiter,
 				    GFP_KERNEL);
@@ -490,23 +496,23 @@ static int ila_nl_dump_start(struct netlink_callback *cb)
 
 static int ila_nl_dump_done(struct netlink_callback *cb)
 {
-	struct ila_dump_iter *iter = (struct ila_dump_iter *)cb->args;
+	struct ila_dump_iter *iter = (struct ila_dump_iter *)cb->args[0];
 
 	rhashtable_walk_exit(&iter->rhiter);
+
+	kfree(iter);
 
 	return 0;
 }
 
 static int ila_nl_dump(struct sk_buff *skb, struct netlink_callback *cb)
 {
-	struct ila_dump_iter *iter = (struct ila_dump_iter *)cb->args;
+	struct ila_dump_iter *iter = (struct ila_dump_iter *)cb->args[0];
 	struct rhashtable_iter *rhiter = &iter->rhiter;
 	struct ila_map *ila;
 	int ret;
 
-	ret = rhashtable_walk_start(rhiter);
-	if (ret && ret != -EAGAIN)
-		goto done;
+	rhashtable_walk_start(rhiter);
 
 	for (;;) {
 		ila = rhashtable_walk_next(rhiter);
@@ -561,6 +567,18 @@ static const struct genl_ops ila_nl_ops[] = {
 	},
 };
 
+static struct genl_family ila_nl_family __ro_after_init = {
+	.hdrsize	= 0,
+	.name		= ILA_GENL_NAME,
+	.version	= ILA_GENL_VERSION,
+	.maxattr	= ILA_ATTR_MAX,
+	.netnsok	= true,
+	.parallel_ops	= true,
+	.module		= THIS_MODULE,
+	.ops		= ila_nl_ops,
+	.n_ops		= ARRAY_SIZE(ila_nl_ops),
+};
+
 #define ILA_HASH_TABLE_SIZE 1024
 
 static __net_init int ila_init_net(struct net *net)
@@ -597,7 +615,7 @@ static struct pernet_operations ila_net_ops = {
 	.size = sizeof(struct ila_net),
 };
 
-static int ila_xlat_addr(struct sk_buff *skb, bool set_csum_neutral)
+static int ila_xlat_addr(struct sk_buff *skb, bool sir2ila)
 {
 	struct ila_map *ila;
 	struct ipv6hdr *ip6h = ipv6_hdr(skb);
@@ -607,23 +625,23 @@ static int ila_xlat_addr(struct sk_buff *skb, bool set_csum_neutral)
 
 	/* Assumes skb contains a valid IPv6 header that is pulled */
 
-	if (!ila_addr_is_ila(iaddr)) {
-		/* Type indicates this is not an ILA address */
-		return 0;
-	}
+	/* No check here that ILA type in the mapping matches what is in the
+	 * address. We assume that whatever sender gaves us can be translated.
+	 * The checksum mode however is relevant.
+	 */
 
 	rcu_read_lock();
 
 	ila = ila_lookup_wildcards(iaddr, skb->dev->ifindex, ilan);
 	if (ila)
-		ila_update_ipv6_locator(skb, &ila->xp.ip, set_csum_neutral);
+		ila_update_ipv6_locator(skb, &ila->xp.ip, sir2ila);
 
 	rcu_read_unlock();
 
 	return 0;
 }
 
-int ila_xlat_init(void)
+int __init ila_xlat_init(void)
 {
 	int ret;
 
@@ -631,8 +649,7 @@ int ila_xlat_init(void)
 	if (ret)
 		goto exit;
 
-	ret = genl_register_family_with_ops(&ila_nl_family,
-					    ila_nl_ops);
+	ret = genl_register_family(&ila_nl_family);
 	if (ret < 0)
 		goto unregister;
 

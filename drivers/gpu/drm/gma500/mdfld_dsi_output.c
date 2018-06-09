@@ -335,11 +335,6 @@ static int mdfld_dsi_connector_get_modes(struct drm_connector *connector)
 	struct drm_display_mode *dup_mode = NULL;
 	struct drm_device *dev = connector->dev;
 
-	connector->display_info.min_vfreq = 0;
-	connector->display_info.max_vfreq = 200;
-	connector->display_info.min_hfreq = 0;
-	connector->display_info.max_hfreq = 200;
-
 	if (fixed_mode) {
 		dev_dbg(dev->dev, "fixed_mode %dx%d\n",
 				fixed_mode->hdisplay, fixed_mode->vdisplay);
@@ -351,7 +346,7 @@ static int mdfld_dsi_connector_get_modes(struct drm_connector *connector)
 	return 0;
 }
 
-static int mdfld_dsi_connector_mode_valid(struct drm_connector *connector,
+static enum drm_mode_status mdfld_dsi_connector_mode_valid(struct drm_connector *connector,
 						struct drm_display_mode *mode)
 {
 	struct mdfld_dsi_connector *dsi_connector =

@@ -89,7 +89,7 @@
 
 #define ADE7758_MAX_TX    8
 #define ADE7758_MAX_RX    4
-#define ADE7758_STARTUP_DELAY 1
+#define ADE7758_STARTUP_DELAY 1000
 
 #define AD7758_NUM_WAVSEL	5
 #define AD7758_NUM_PHSEL	3
@@ -111,7 +111,7 @@
  * @trig:		data ready trigger registered with iio
  * @tx:			transmit buffer
  * @rx:			receive buffer
- * @buf_lock:		mutex to protect tx and rx
+ * @buf_lock:		mutex to protect tx, rx, read and write frequency
  **/
 struct ade7758_state {
 	struct spi_device	*us;

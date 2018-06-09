@@ -3,6 +3,9 @@
  *
  * Analog Jack extcon driver with ADC-based detection capability.
  *
+ * Copyright (C) 2016 Samsung Electronics
+ * Chanwoo Choi <cw00.choi@samsung.com>
+ *
  * Copyright (C) 2012 Samsung Electronics
  * MyungJoo Ham <myungjoo.ham@samsung.com>
  *
@@ -23,7 +26,7 @@
 #include <linux/workqueue.h>
 #include <linux/iio/consumer.h>
 #include <linux/extcon/extcon-adc-jack.h>
-#include <linux/extcon.h>
+#include <linux/extcon-provider.h>
 
 /**
  * struct adc_jack_data - internal data for adc_jack device driver
@@ -58,29 +61,30 @@ static void adc_jack_handler(struct work_struct *work)
 	struct adc_jack_data *data = container_of(to_delayed_work(work),
 			struct adc_jack_data,
 			handler);
-	u32 state = 0;
+	struct adc_jack_cond *def;
 	int ret, adc_val;
 	int i;
 
 	ret = iio_read_channel_raw(data->chan, &adc_val);
 	if (ret < 0) {
-		dev_err(&data->edev->dev, "read channel() error: %d\n", ret);
+		dev_err(data->dev, "read channel() error: %d\n", ret);
 		return;
 	}
 
 	/* Get state from adc value with adc_conditions */
 	for (i = 0; i < data->num_conditions; i++) {
-		struct adc_jack_cond *def = &data->adc_conditions[i];
-		if (!def->state)
-			break;
+		def = &data->adc_conditions[i];
 		if (def->min_adc <= adc_val && def->max_adc >= adc_val) {
-			state = def->state;
-			break;
+			extcon_set_state_sync(data->edev, def->id, true);
+			return;
 		}
 	}
-	/* if no def has met, it means state = 0 (no cables attached) */
 
-	extcon_set_state(data->edev, state);
+	/* Set the detached state if adc value is not included in the range */
+	for (i = 0; i < data->num_conditions; i++) {
+		def = &data->adc_conditions[i];
+		extcon_set_state_sync(data->edev, def->id, false);
+	}
 }
 
 static irqreturn_t adc_jack_irq_thread(int irq, void *_data)
@@ -114,16 +118,14 @@ static int adc_jack_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
-	if (!pdata->adc_conditions ||
-			!pdata->adc_conditions[0].state) {
+	if (!pdata->adc_conditions) {
 		dev_err(&pdev->dev, "error: adc_conditions not defined.\n");
 		return -EINVAL;
 	}
 	data->adc_conditions = pdata->adc_conditions;
 
 	/* Check the length of array and set num_conditions */
-	for (i = 0; data->adc_conditions[i].state; i++)
-		;
+	for (i = 0; data->adc_conditions[i].id != EXTCON_NONE; i++);
 	data->num_conditions = i;
 
 	data->chan = iio_channel_get(&pdev->dev, pdata->consumer_channel);
@@ -142,7 +144,7 @@ static int adc_jack_probe(struct platform_device *pdev)
 		return err;
 
 	data->irq = platform_get_irq(pdev, 0);
-	if (!data->irq) {
+	if (data->irq < 0) {
 		dev_err(&pdev->dev, "platform_get_irq failed\n");
 		return -ENODEV;
 	}
@@ -158,6 +160,7 @@ static int adc_jack_probe(struct platform_device *pdev)
 	if (data->wakeup_source)
 		device_init_wakeup(&pdev->dev, 1);
 
+	adc_jack_handler(&data->handler.work);
 	return 0;
 }
 

@@ -10,7 +10,7 @@
 #include <asm/cputable.h>
 #include <stdbool.h>
 
-#include "../utils.h"
+#include "utils.h"
 
 static inline bool have_htm(void)
 {
@@ -47,9 +47,41 @@ static inline bool failure_is_syscall(void)
 	return (failure_code() & TM_CAUSE_SYSCALL) == TM_CAUSE_SYSCALL;
 }
 
+static inline bool failure_is_unavailable(void)
+{
+	return (failure_code() & TM_CAUSE_FAC_UNAV) == TM_CAUSE_FAC_UNAV;
+}
+
 static inline bool failure_is_nesting(void)
 {
 	return (__builtin_get_texasru() & 0x400000);
+}
+
+static inline int tcheck(void)
+{
+	long cr;
+	asm volatile ("tcheck 0" : "=r"(cr) : : "cr0");
+	return (cr >> 28) & 4;
+}
+
+static inline bool tcheck_doomed(void)
+{
+	return tcheck() & 8;
+}
+
+static inline bool tcheck_active(void)
+{
+	return tcheck() & 4;
+}
+
+static inline bool tcheck_suspended(void)
+{
+	return tcheck() & 2;
+}
+
+static inline bool tcheck_transactional(void)
+{
+	return tcheck() & 6;
 }
 
 #endif /* _SELFTESTS_POWERPC_TM_TM_H */

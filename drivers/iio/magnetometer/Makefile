@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for industrial I/O Magnetometer sensor drivers
 #
 
 # When adding new entries keep the list in alphabetical order
+obj-$(CONFIG_AK8974)	+= ak8974.o
 obj-$(CONFIG_AK8975)	+= ak8975.o
 obj-$(CONFIG_BMC150_MAGN) += bmc150_magn.o
 obj-$(CONFIG_BMC150_MAGN_I2C) += bmc150_magn_i2c.o

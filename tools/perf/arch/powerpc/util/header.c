@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <sys/types.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -31,4 +32,15 @@ get_cpuid(char *buffer, size_t sz)
 		return 0;
 	}
 	return -1;
+}
+
+char *
+get_cpuid_str(struct perf_pmu *pmu __maybe_unused)
+{
+	char *bufp;
+
+	if (asprintf(&bufp, "%.8lx", mfspr(SPRN_PVR)) < 0)
+		bufp = NULL;
+
+	return bufp;
 }

@@ -214,7 +214,7 @@ static int rx8025_get_time(struct device *dev, struct rtc_time *dt)
 		dt->tm_sec, dt->tm_min, dt->tm_hour,
 		dt->tm_mday, dt->tm_mon, dt->tm_year);
 
-	return rtc_valid_tm(dt);
+	return 0;
 }
 
 static int rx8025_set_time(struct device *dev, struct rtc_time *dt)
@@ -403,7 +403,7 @@ static int rx8025_alarm_irq_enable(struct device *dev, unsigned int enabled)
 	return 0;
 }
 
-static struct rtc_class_ops rx8025_rtc_ops = {
+static const struct rtc_class_ops rx8025_rtc_ops = {
 	.read_time = rx8025_get_time,
 	.set_time = rx8025_set_time,
 	.read_alarm = rx8025_read_alarm,

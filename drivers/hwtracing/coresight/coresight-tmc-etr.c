@@ -1,18 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright(C) 2016 Linaro Limited. All rights reserved.
  * Author: Mathieu Poirier <mathieu.poirier@linaro.org>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/coresight.h>
@@ -20,9 +9,9 @@
 #include "coresight-priv.h"
 #include "coresight-tmc.h"
 
-void tmc_etr_enable_hw(struct tmc_drvdata *drvdata)
+static void tmc_etr_enable_hw(struct tmc_drvdata *drvdata)
 {
-	u32 axictl;
+	u32 axictl, sts;
 
 	/* Zero out the memory to help with debug */
 	memset(drvdata->vaddr, 0, drvdata->size);
@@ -36,17 +25,29 @@ void tmc_etr_enable_hw(struct tmc_drvdata *drvdata)
 	writel_relaxed(TMC_MODE_CIRCULAR_BUFFER, drvdata->base + TMC_MODE);
 
 	axictl = readl_relaxed(drvdata->base + TMC_AXICTL);
-	axictl |= TMC_AXICTL_WR_BURST_16;
-	writel_relaxed(axictl, drvdata->base + TMC_AXICTL);
-	axictl &= ~TMC_AXICTL_SCT_GAT_MODE;
-	writel_relaxed(axictl, drvdata->base + TMC_AXICTL);
-	axictl = (axictl &
-		  ~(TMC_AXICTL_PROT_CTL_B0 | TMC_AXICTL_PROT_CTL_B1)) |
-		  TMC_AXICTL_PROT_CTL_B1;
-	writel_relaxed(axictl, drvdata->base + TMC_AXICTL);
+	axictl &= ~TMC_AXICTL_CLEAR_MASK;
+	axictl |= (TMC_AXICTL_PROT_CTL_B1 | TMC_AXICTL_WR_BURST_16);
+	axictl |= TMC_AXICTL_AXCACHE_OS;
 
-	writel_relaxed(drvdata->paddr, drvdata->base + TMC_DBALO);
-	writel_relaxed(0x0, drvdata->base + TMC_DBAHI);
+	if (tmc_etr_has_cap(drvdata, TMC_ETR_AXI_ARCACHE)) {
+		axictl &= ~TMC_AXICTL_ARCACHE_MASK;
+		axictl |= TMC_AXICTL_ARCACHE_OS;
+	}
+
+	writel_relaxed(axictl, drvdata->base + TMC_AXICTL);
+	tmc_write_dba(drvdata, drvdata->paddr);
+	/*
+	 * If the TMC pointers must be programmed before the session,
+	 * we have to set it properly (i.e, RRP/RWP to base address and
+	 * STS to "not full").
+	 */
+	if (tmc_etr_has_cap(drvdata, TMC_ETR_SAVE_RESTORE)) {
+		tmc_write_rrp(drvdata, drvdata->paddr);
+		tmc_write_rwp(drvdata, drvdata->paddr);
+		sts = readl_relaxed(drvdata->base + TMC_STS) & ~TMC_STS_FULL;
+		writel_relaxed(sts, drvdata->base + TMC_STS);
+	}
+
 	writel_relaxed(TMC_FFCR_EN_FMT | TMC_FFCR_EN_TI |
 		       TMC_FFCR_FON_FLIN | TMC_FFCR_FON_TRIG_EVT |
 		       TMC_FFCR_TRIGON_TRIGIN,
@@ -59,16 +60,35 @@ void tmc_etr_enable_hw(struct tmc_drvdata *drvdata)
 
 static void tmc_etr_dump_hw(struct tmc_drvdata *drvdata)
 {
-	u32 rwp, val;
+	const u32 *barrier;
+	u32 val;
+	u32 *temp;
+	u64 rwp;
 
-	rwp = readl_relaxed(drvdata->base + TMC_RWP);
+	rwp = tmc_read_rwp(drvdata);
 	val = readl_relaxed(drvdata->base + TMC_STS);
 
-	/* How much memory do we still have */
-	if (val & BIT(0))
+	/*
+	 * Adjust the buffer to point to the beginning of the trace data
+	 * and update the available trace data.
+	 */
+	if (val & TMC_STS_FULL) {
 		drvdata->buf = drvdata->vaddr + rwp - drvdata->paddr;
-	else
+		drvdata->len = drvdata->size;
+
+		barrier = barrier_pkt;
+		temp = (u32 *)drvdata->buf;
+
+		while (*barrier) {
+			*temp = *barrier;
+			temp++;
+			barrier++;
+		}
+
+	} else {
 		drvdata->buf = drvdata->vaddr;
+		drvdata->len = rwp - drvdata->paddr;
+	}
 }
 
 static void tmc_etr_disable_hw(struct tmc_drvdata *drvdata)
@@ -80,26 +100,21 @@ static void tmc_etr_disable_hw(struct tmc_drvdata *drvdata)
 	 * When operating in sysFS mode the content of the buffer needs to be
 	 * read before the TMC is disabled.
 	 */
-	if (local_read(&drvdata->mode) == CS_MODE_SYSFS)
+	if (drvdata->mode == CS_MODE_SYSFS)
 		tmc_etr_dump_hw(drvdata);
 	tmc_disable_hw(drvdata);
 
 	CS_LOCK(drvdata->base);
 }
 
-static int tmc_enable_etr_sink_sysfs(struct coresight_device *csdev, u32 mode)
+static int tmc_enable_etr_sink_sysfs(struct coresight_device *csdev)
 {
 	int ret = 0;
 	bool used = false;
-	long val;
 	unsigned long flags;
 	void __iomem *vaddr = NULL;
-	dma_addr_t paddr;
+	dma_addr_t paddr = 0;
 	struct tmc_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
-
-	 /* This shouldn't be happening */
-	if (WARN_ON(mode != CS_MODE_SYSFS))
-		return -EINVAL;
 
 	/*
 	 * If we don't have a buffer release the lock and allocate memory.
@@ -128,29 +143,27 @@ static int tmc_enable_etr_sink_sysfs(struct coresight_device *csdev, u32 mode)
 		goto out;
 	}
 
-	val = local_xchg(&drvdata->mode, mode);
 	/*
 	 * In sysFS mode we can have multiple writers per sink.  Since this
 	 * sink is already enabled no memory is needed and the HW need not be
 	 * touched.
 	 */
-	if (val == CS_MODE_SYSFS)
+	if (drvdata->mode == CS_MODE_SYSFS)
 		goto out;
 
 	/*
-	 * If drvdata::buf == NULL, use the memory allocated above.
+	 * If drvdata::vaddr == NULL, use the memory allocated above.
 	 * Otherwise a buffer still exists from a previous session, so
 	 * simply use that.
 	 */
-	if (drvdata->buf == NULL) {
+	if (drvdata->vaddr == NULL) {
 		used = true;
 		drvdata->vaddr = vaddr;
 		drvdata->paddr = paddr;
 		drvdata->buf = drvdata->vaddr;
 	}
 
-	memset(drvdata->vaddr, 0, drvdata->size);
-
+	drvdata->mode = CS_MODE_SYSFS;
 	tmc_etr_enable_hw(drvdata);
 out:
 	spin_unlock_irqrestore(&drvdata->spinlock, flags);
@@ -165,16 +178,11 @@ out:
 	return ret;
 }
 
-static int tmc_enable_etr_sink_perf(struct coresight_device *csdev, u32 mode)
+static int tmc_enable_etr_sink_perf(struct coresight_device *csdev)
 {
 	int ret = 0;
-	long val;
 	unsigned long flags;
 	struct tmc_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
-
-	 /* This shouldn't be happening */
-	if (WARN_ON(mode != CS_MODE_PERF))
-		return -EINVAL;
 
 	spin_lock_irqsave(&drvdata->spinlock, flags);
 	if (drvdata->reading) {
@@ -182,17 +190,17 @@ static int tmc_enable_etr_sink_perf(struct coresight_device *csdev, u32 mode)
 		goto out;
 	}
 
-	val = local_xchg(&drvdata->mode, mode);
 	/*
 	 * In Perf mode there can be only one writer per sink.  There
 	 * is also no need to continue if the ETR is already operated
 	 * from sysFS.
 	 */
-	if (val != CS_MODE_DISABLED) {
+	if (drvdata->mode != CS_MODE_DISABLED) {
 		ret = -EINVAL;
 		goto out;
 	}
 
+	drvdata->mode = CS_MODE_PERF;
 	tmc_etr_enable_hw(drvdata);
 out:
 	spin_unlock_irqrestore(&drvdata->spinlock, flags);
@@ -204,9 +212,9 @@ static int tmc_enable_etr_sink(struct coresight_device *csdev, u32 mode)
 {
 	switch (mode) {
 	case CS_MODE_SYSFS:
-		return tmc_enable_etr_sink_sysfs(csdev, mode);
+		return tmc_enable_etr_sink_sysfs(csdev);
 	case CS_MODE_PERF:
-		return tmc_enable_etr_sink_perf(csdev, mode);
+		return tmc_enable_etr_sink_perf(csdev);
 	}
 
 	/* We shouldn't be here */
@@ -215,7 +223,6 @@ static int tmc_enable_etr_sink(struct coresight_device *csdev, u32 mode)
 
 static void tmc_disable_etr_sink(struct coresight_device *csdev)
 {
-	long val;
 	unsigned long flags;
 	struct tmc_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
 
@@ -225,10 +232,11 @@ static void tmc_disable_etr_sink(struct coresight_device *csdev)
 		return;
 	}
 
-	val = local_xchg(&drvdata->mode, CS_MODE_DISABLED);
 	/* Disable the TMC only if it needs to */
-	if (val != CS_MODE_DISABLED)
+	if (drvdata->mode != CS_MODE_DISABLED) {
 		tmc_etr_disable_hw(drvdata);
+		drvdata->mode = CS_MODE_DISABLED;
+	}
 
 	spin_unlock_irqrestore(&drvdata->spinlock, flags);
 
@@ -247,7 +255,6 @@ const struct coresight_ops tmc_etr_cs_ops = {
 int tmc_read_prepare_etr(struct tmc_drvdata *drvdata)
 {
 	int ret = 0;
-	long val;
 	unsigned long flags;
 
 	/* config types are set a boot time and never change */
@@ -260,9 +267,8 @@ int tmc_read_prepare_etr(struct tmc_drvdata *drvdata)
 		goto out;
 	}
 
-	val = local_read(&drvdata->mode);
 	/* Don't interfere if operated from Perf */
-	if (val == CS_MODE_PERF) {
+	if (drvdata->mode == CS_MODE_PERF) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -274,7 +280,7 @@ int tmc_read_prepare_etr(struct tmc_drvdata *drvdata)
 	}
 
 	/* Disable the TMC if need be */
-	if (val == CS_MODE_SYSFS)
+	if (drvdata->mode == CS_MODE_SYSFS)
 		tmc_etr_disable_hw(drvdata);
 
 	drvdata->reading = true;
@@ -297,7 +303,7 @@ int tmc_read_unprepare_etr(struct tmc_drvdata *drvdata)
 	spin_lock_irqsave(&drvdata->spinlock, flags);
 
 	/* RE-enable the TMC if need be */
-	if (local_read(&drvdata->mode) == CS_MODE_SYSFS) {
+	if (drvdata->mode == CS_MODE_SYSFS) {
 		/*
 		 * The trace run will continue with the same allocated trace
 		 * buffer. The trace buffer is cleared in tmc_etr_enable_hw(),

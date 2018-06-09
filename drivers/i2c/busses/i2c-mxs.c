@@ -181,7 +181,7 @@ static int mxs_i2c_dma_setup_xfer(struct i2c_adapter *adap,
 	struct mxs_i2c_dev *i2c = i2c_get_adapdata(adap);
 
 	if (msg->flags & I2C_M_RD) {
-		i2c->dma_read = 1;
+		i2c->dma_read = true;
 		i2c->addr_data = (msg->addr << 1) | I2C_SMBUS_READ;
 
 		/*
@@ -239,7 +239,7 @@ static int mxs_i2c_dma_setup_xfer(struct i2c_adapter *adap,
 			goto read_init_dma_fail;
 		}
 	} else {
-		i2c->dma_read = 0;
+		i2c->dma_read = false;
 		i2c->addr_data = (msg->addr << 1) | I2C_SMBUS_WRITE;
 
 		/*
@@ -419,7 +419,7 @@ static int mxs_i2c_pio_setup_xfer(struct i2c_adapter *adap,
 
 		ret = mxs_i2c_pio_wait_xfer_end(i2c);
 		if (ret) {
-			dev_err(i2c->dev,
+			dev_dbg(i2c->dev,
 				"PIO: Failed to send SELECT command!\n");
 			goto cleanup;
 		}
@@ -431,7 +431,7 @@ static int mxs_i2c_pio_setup_xfer(struct i2c_adapter *adap,
 
 		ret = mxs_i2c_pio_wait_xfer_end(i2c);
 		if (ret) {
-			dev_err(i2c->dev,
+			dev_dbg(i2c->dev,
 				"PIO: Failed to send READ command!\n");
 			goto cleanup;
 		}
@@ -528,7 +528,7 @@ static int mxs_i2c_pio_setup_xfer(struct i2c_adapter *adap,
 			/* Wait for the end of the transfer. */
 			ret = mxs_i2c_pio_wait_xfer_end(i2c);
 			if (ret) {
-				dev_err(i2c->dev,
+				dev_dbg(i2c->dev,
 					"PIO: Failed to finish WRITE cmd!\n");
 				break;
 			}
@@ -868,7 +868,6 @@ static int mxs_i2c_probe(struct platform_device *pdev)
 	i2c_set_adapdata(adap, i2c);
 	err = i2c_add_numbered_adapter(adap);
 	if (err) {
-		dev_err(dev, "Failed to add adapter (%d)\n", err);
 		writel(MXS_I2C_CTRL0_SFTRST,
 				i2c->regs + MXS_I2C_CTRL0_SET);
 		return err;

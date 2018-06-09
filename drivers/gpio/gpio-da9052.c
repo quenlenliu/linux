@@ -15,7 +15,7 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/platform_device.h>
-#include <linux/gpio.h>
+#include <linux/gpio/driver.h>
 #include <linux/syscalls.h>
 #include <linux/seq_file.h>
 
@@ -184,7 +184,7 @@ static int da9052_gpio_to_irq(struct gpio_chip *gc, u32 offset)
 	return irq;
 }
 
-static struct gpio_chip reference_gp = {
+static const struct gpio_chip reference_gp = {
 	.label = "da9052-gpio",
 	.owner = THIS_MODULE,
 	.get = da9052_gpio_get,

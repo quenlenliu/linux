@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * This file is included twice from vdso2c.c.  It generates code for 32-bit
  * and 64-bit vDSOs.  We need both for 64-bit builds, since 32-bit vDSOs
@@ -22,7 +23,7 @@ static void BITSFUNC(go)(void *raw_addr, size_t raw_len,
 
 	ELF(Phdr) *pt = (ELF(Phdr) *)(raw_addr + GET_LE(&hdr->e_phoff));
 
-	if (hdr->e_type != ET_DYN)
+	if (GET_LE(&hdr->e_type) != ET_DYN)
 		fail("input is not a shared object\n");
 
 	/* Walk the segment table. */

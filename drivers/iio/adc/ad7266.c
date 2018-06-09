@@ -280,7 +280,6 @@ static AD7266_DECLARE_DIFF_CHANNELS_FIXED(u, 'u');
 static const struct iio_info ad7266_info = {
 	.read_raw = &ad7266_read_raw,
 	.update_scan_mode = &ad7266_update_scan_mode,
-	.driver_module = THIS_MODULE,
 };
 
 static const unsigned long ad7266_available_scan_masks[] = {
@@ -481,7 +480,7 @@ error_free_gpios:
 	if (!st->fixed_addr)
 		gpio_free_array(st->gpios, ARRAY_SIZE(st->gpios));
 error_disable_reg:
-	if (!IS_ERR_OR_NULL(st->reg))
+	if (!IS_ERR(st->reg))
 		regulator_disable(st->reg);
 
 	return ret;
@@ -496,7 +495,7 @@ static int ad7266_remove(struct spi_device *spi)
 	iio_triggered_buffer_cleanup(indio_dev);
 	if (!st->fixed_addr)
 		gpio_free_array(st->gpios, ARRAY_SIZE(st->gpios));
-	if (!IS_ERR_OR_NULL(st->reg))
+	if (!IS_ERR(st->reg))
 		regulator_disable(st->reg);
 
 	return 0;

@@ -66,8 +66,7 @@ static void __init mpc836x_mds_setup_arch(void)
 	struct device_node *np;
 	u8 __iomem *bcsr_regs = NULL;
 
-	if (ppc_md.progress)
-		ppc_md.progress("mpc836x_mds_setup_arch()", 0);
+	mpc83xx_setup_arch();
 
 	/* Map BCSR area */
 	np = of_find_node_by_name(NULL, "bcsr");
@@ -79,14 +78,12 @@ static void __init mpc836x_mds_setup_arch(void)
 		of_node_put(np);
 	}
 
-	mpc83xx_setup_pci();
-
 #ifdef CONFIG_QUICC_ENGINE
 	if ((np = of_find_node_by_name(NULL, "par_io")) != NULL) {
 		par_io_init(np);
 		of_node_put(np);
 
-		for (np = NULL; (np = of_find_node_by_name(np, "ucc")) != NULL;)
+		for_each_node_by_name(np, "ucc")
 			par_io_of_config(np);
 #ifdef CONFIG_QE_USB
 		/* Must fixup Par IO before QE GPIO chips are registered. */

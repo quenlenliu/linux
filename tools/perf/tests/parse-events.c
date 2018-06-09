@@ -1,4 +1,4 @@
-
+// SPDX-License-Identifier: GPL-2.0
 #include "parse-events.h"
 #include "evsel.h"
 #include "evlist.h"
@@ -6,8 +6,14 @@
 #include "tests.h"
 #include "debug.h"
 #include "util.h"
+#include <dirent.h>
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <linux/kernel.h>
 #include <linux/hw_breakpoint.h>
-#include <api/fs/fs.h>
+#include <api/fs/tracing_path.h>
 
 #define PERF_TP_SAMPLE_TYPE (PERF_SAMPLE_RAW | PERF_SAMPLE_TIME | \
 			     PERF_SAMPLE_CPU | PERF_SAMPLE_PERIOD)
@@ -1303,18 +1309,26 @@ static int test__checkevent_config_cache(struct perf_evlist *evlist)
 	return 0;
 }
 
+static int test__intel_pt(struct perf_evlist *evlist)
+{
+	struct perf_evsel *evsel = perf_evlist__first(evlist);
+
+	TEST_ASSERT_VAL("wrong name setting", strcmp(evsel->name, "intel_pt//u") == 0);
+	return 0;
+}
+
 static int count_tracepoints(void)
 {
 	struct dirent *events_ent;
 	DIR *events_dir;
 	int cnt = 0;
 
-	events_dir = opendir(tracing_events_path);
+	events_dir = tracing_events__opendir();
 
 	TEST_ASSERT_VAL("Can't open events dir", events_dir);
 
 	while ((events_ent = readdir(events_dir))) {
-		char sys_path[PATH_MAX];
+		char *sys_path;
 		struct dirent *sys_ent;
 		DIR *sys_dir;
 
@@ -1325,8 +1339,8 @@ static int count_tracepoints(void)
 		    || !strcmp(events_ent->d_name, "header_page"))
 			continue;
 
-		scnprintf(sys_path, PATH_MAX, "%s/%s",
-			  tracing_events_path, events_ent->d_name);
+		sys_path = get_events_file(events_ent->d_name);
+		TEST_ASSERT_VAL("Can't get sys path", sys_path);
 
 		sys_dir = opendir(sys_path);
 		TEST_ASSERT_VAL("Can't open sys dir", sys_dir);
@@ -1342,6 +1356,7 @@ static int count_tracepoints(void)
 		}
 
 		closedir(sys_dir);
+		put_events_file(sys_path);
 	}
 
 	closedir(events_dir);
@@ -1631,6 +1646,11 @@ static struct evlist_test test__events[] = {
 		.check = test__checkevent_config_cache,
 		.id    = 51,
 	},
+	{
+		.name  = "intel_pt//u",
+		.check = test__intel_pt,
+		.id    = 52,
+	},
 };
 
 static struct evlist_test test__events_pmu[] = {
@@ -1779,15 +1799,14 @@ static int test_pmu_events(void)
 	}
 
 	while (!ret && (ent = readdir(dir))) {
-#define MAX_NAME 100
 		struct evlist_test e;
-		char name[MAX_NAME];
+		char name[2 * NAME_MAX + 1 + 12 + 3];
 
 		/* Names containing . are special and cannot be used directly */
 		if (strchr(ent->d_name, '.'))
 			continue;
 
-		snprintf(name, MAX_NAME, "cpu/event=%s/u", ent->d_name);
+		snprintf(name, sizeof(name), "cpu/event=%s/u", ent->d_name);
 
 		e.name  = name;
 		e.check = test__checkevent_pmu_events;
@@ -1795,29 +1814,17 @@ static int test_pmu_events(void)
 		ret = test_event(&e);
 		if (ret)
 			break;
-		snprintf(name, MAX_NAME, "%s:u,cpu/event=%s/u", ent->d_name, ent->d_name);
+		snprintf(name, sizeof(name), "%s:u,cpu/event=%s/u", ent->d_name, ent->d_name);
 		e.name  = name;
 		e.check = test__checkevent_pmu_events_mix;
 		ret = test_event(&e);
-#undef MAX_NAME
 	}
 
 	closedir(dir);
 	return ret;
 }
 
-static void debug_warn(const char *warn, va_list params)
-{
-	char msg[1024];
-
-	if (!verbose)
-		return;
-
-	vsnprintf(msg, sizeof(msg), warn, params);
-	fprintf(stderr, " Warning: %s\n", msg);
-}
-
-int test__parse_events(int subtest __maybe_unused)
+int test__parse_events(struct test *test __maybe_unused, int subtest __maybe_unused)
 {
 	int ret1, ret2 = 0;
 
@@ -1827,8 +1834,6 @@ do {							\
 	if (!ret2)					\
 		ret2 = ret1;				\
 } while (0)
-
-	set_warning_routine(debug_warn);
 
 	TEST_EVENTS(test__events);
 

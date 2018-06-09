@@ -37,6 +37,21 @@
 #include <linux/of_gpio.h>
 #endif
 
+static int __init cpm_init(void)
+{
+	struct device_node *np;
+
+	np = of_find_compatible_node(NULL, NULL, "fsl,cpm1");
+	if (!np)
+		np = of_find_compatible_node(NULL, NULL, "fsl,cpm2");
+	if (!np)
+		return -ENODEV;
+	cpm_muram_init();
+	of_node_put(np);
+	return 0;
+}
+subsys_initcall(cpm_init);
+
 #ifdef CONFIG_PPC_EARLY_DEBUG_CPM
 static u32 __iomem *cpm_udbg_txdesc;
 static u8 __iomem *cpm_udbg_txbuf;
@@ -175,8 +190,9 @@ static int cpm2_gpio32_dir_in(struct gpio_chip *gc, unsigned int gpio)
 	return 0;
 }
 
-int cpm2_gpiochip_add32(struct device_node *np)
+int cpm2_gpiochip_add32(struct device *dev)
 {
+	struct device_node *np = dev->of_node;
 	struct cpm2_gpio32_chip *cpm2_gc;
 	struct of_mm_gpio_chip *mm_gc;
 	struct gpio_chip *gc;
@@ -196,6 +212,8 @@ int cpm2_gpiochip_add32(struct device_node *np)
 	gc->direction_output = cpm2_gpio32_dir_out;
 	gc->get = cpm2_gpio32_get;
 	gc->set = cpm2_gpio32_set;
+	gc->parent = dev;
+	gc->owner = THIS_MODULE;
 
 	return of_mm_gpiochip_add_data(np, mm_gc, cpm2_gc);
 }

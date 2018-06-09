@@ -66,7 +66,6 @@ MODULE_PARM_DESC(compat_ddr_negotiate,
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Intel <ibsupport@intel.com>");
 MODULE_DESCRIPTION("Intel IB driver");
-MODULE_VERSION(QIB_DRIVER_VERSION);
 
 /*
  * QIB_PIO_MAXIBHDR is the max IB header size allowed for in our
@@ -81,22 +80,6 @@ MODULE_VERSION(QIB_DRIVER_VERSION);
 #define QIB_MAX_PKT_RECV 64
 
 struct qlogic_ib_stats qib_stats;
-
-const char *qib_get_unit_name(int unit)
-{
-	static char iname[16];
-
-	snprintf(iname, sizeof(iname), "infinipath%u", unit);
-	return iname;
-}
-
-const char *qib_get_card_name(struct rvt_dev_info *rdi)
-{
-	struct qib_ibdev *ibdev = container_of(rdi, struct qib_ibdev, rdi);
-	struct qib_devdata *dd = container_of(ibdev,
-					      struct qib_devdata, verbs_dev);
-	return qib_get_unit_name(dd->unit);
-}
 
 struct pci_dev *qib_get_pci_dev(struct rvt_dev_info *rdi)
 {
@@ -319,8 +302,8 @@ static u32 qib_rcv_hdrerr(struct qib_ctxtdata *rcd, struct qib_pportdata *ppd,
 		ret = 1;
 	else if (eflags == QLOGIC_IB_RHF_H_TIDERR) {
 		/* For TIDERR and RC QPs premptively schedule a NAK */
-		struct qib_ib_header *hdr = (struct qib_ib_header *) rhdr;
-		struct qib_other_headers *ohdr = NULL;
+		struct ib_header *hdr = (struct ib_header *)rhdr;
+		struct ib_other_headers *ohdr = NULL;
 		struct qib_ibport *ibp = &ppd->ibport_data;
 		struct qib_devdata *dd = ppd->dd;
 		struct rvt_dev_info *rdi = &dd->verbs_dev.rdi;
@@ -420,8 +403,7 @@ static u32 qib_rcv_hdrerr(struct qib_ctxtdata *rcd, struct qib_pportdata *ppd,
 						if (list_empty(&qp->rspwait)) {
 							qp->r_flags |=
 								RVT_R_RSP_NAK;
-							atomic_inc(
-								&qp->refcount);
+							rvt_get_qp(qp);
 							list_add_tail(
 							 &qp->rspwait,
 							 &rcd->qp_wait_list);
@@ -588,8 +570,7 @@ move_along:
 				qib_schedule_send(qp);
 			spin_unlock_irqrestore(&qp->s_lock, flags);
 		}
-		if (atomic_dec_and_test(&qp->refcount))
-			wake_up(&qp->wait);
+		rvt_put_qp(qp);
 	}
 
 bail:
@@ -685,9 +666,10 @@ int qib_set_lid(struct qib_pportdata *ppd, u32 lid, u8 lmc)
 /* Below is "non-zero" to force override, but both actual LEDs are off */
 #define LED_OVER_BOTH_OFF (8)
 
-static void qib_run_led_override(unsigned long opaque)
+static void qib_run_led_override(struct timer_list *t)
 {
-	struct qib_pportdata *ppd = (struct qib_pportdata *)opaque;
+	struct qib_pportdata *ppd = from_timer(ppd, t,
+						    led_override_timer);
 	struct qib_devdata *dd = ppd->dd;
 	int timeoff;
 	int ph_idx;
@@ -738,9 +720,7 @@ void qib_set_led_override(struct qib_pportdata *ppd, unsigned int val)
 	 */
 	if (atomic_inc_return(&ppd->led_override_timer_active) == 1) {
 		/* Need to start timer */
-		init_timer(&ppd->led_override_timer);
-		ppd->led_override_timer.function = qib_run_led_override;
-		ppd->led_override_timer.data = (unsigned long) ppd;
+		timer_setup(&ppd->led_override_timer, qib_run_led_override, 0);
 		ppd->led_override_timer.expires = jiffies + 1;
 		add_timer(&ppd->led_override_timer);
 	} else {

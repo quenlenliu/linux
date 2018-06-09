@@ -23,6 +23,7 @@
 #include "xfs_log_format.h"
 #include "xfs_trans_resv.h"
 #include "xfs_bit.h"
+#include "xfs_shared.h"
 #include "xfs_mount.h"
 #include "xfs_defer.h"
 #include "xfs_trans.h"
@@ -52,17 +53,21 @@ xfs_rui_item_free(
 }
 
 /*
- * This returns the number of iovecs needed to log the given rui item.
- * We only need 1 iovec for an rui item.  It just logs the rui_log_format
- * structure.
+ * Freeing the RUI requires that we remove it from the AIL if it has already
+ * been placed there. However, the RUI may not yet have been placed in the AIL
+ * when called by xfs_rui_release() from RUD processing due to the ordering of
+ * committed vs unpin operations in bulk insert operations. Hence the reference
+ * count to ensure only the last caller frees the RUI.
  */
-static inline int
-xfs_rui_item_sizeof(
-	struct xfs_rui_log_item *ruip)
+void
+xfs_rui_release(
+	struct xfs_rui_log_item	*ruip)
 {
-	return sizeof(struct xfs_rui_log_format) +
-			(ruip->rui_format.rui_nextents - 1) *
-			sizeof(struct xfs_map_extent);
+	ASSERT(atomic_read(&ruip->rui_refcount) > 0);
+	if (atomic_dec_and_test(&ruip->rui_refcount)) {
+		xfs_trans_ail_remove(&ruip->rui_item, SHUTDOWN_LOG_IO_ERROR);
+		xfs_rui_item_free(ruip);
+	}
 }
 
 STATIC void
@@ -71,8 +76,10 @@ xfs_rui_item_size(
 	int			*nvecs,
 	int			*nbytes)
 {
+	struct xfs_rui_log_item	*ruip = RUI_ITEM(lip);
+
 	*nvecs += 1;
-	*nbytes += xfs_rui_item_sizeof(RUI_ITEM(lip));
+	*nbytes += xfs_rui_log_format_sizeof(ruip->rui_format.rui_nextents);
 }
 
 /*
@@ -97,7 +104,7 @@ xfs_rui_item_format(
 	ruip->rui_format.rui_size = 1;
 
 	xlog_copy_iovec(lv, &vecp, XLOG_REG_TYPE_RUI_FORMAT, &ruip->rui_format,
-			xfs_rui_item_sizeof(ruip));
+			xfs_rui_log_format_sizeof(ruip->rui_format.rui_nextents));
 }
 
 /*
@@ -151,8 +158,8 @@ STATIC void
 xfs_rui_item_unlock(
 	struct xfs_log_item	*lip)
 {
-	if (lip->li_flags & XFS_LI_ABORTED)
-		xfs_rui_item_free(RUI_ITEM(lip));
+	if (test_bit(XFS_LI_ABORTED, &lip->li_flags))
+		xfs_rui_release(RUI_ITEM(lip));
 }
 
 /*
@@ -205,16 +212,12 @@ xfs_rui_init(
 
 {
 	struct xfs_rui_log_item		*ruip;
-	uint				size;
 
 	ASSERT(nextents > 0);
-	if (nextents > XFS_RUI_MAX_FAST_EXTENTS) {
-		size = (uint)(sizeof(struct xfs_rui_log_item) +
-			((nextents - 1) * sizeof(struct xfs_map_extent)));
-		ruip = kmem_zalloc(size, KM_SLEEP);
-	} else {
+	if (nextents > XFS_RUI_MAX_FAST_EXTENTS)
+		ruip = kmem_zalloc(xfs_rui_log_item_sizeof(nextents), KM_SLEEP);
+	else
 		ruip = kmem_zone_zalloc(xfs_rui_zone, KM_SLEEP);
-	}
 
 	xfs_log_item_init(mp, &ruip->rui_item, XFS_LI_RUI, &xfs_rui_item_ops);
 	ruip->rui_format.rui_nextents = nextents;
@@ -239,32 +242,13 @@ xfs_rui_copy_format(
 	uint				len;
 
 	src_rui_fmt = buf->i_addr;
-	len = sizeof(struct xfs_rui_log_format) +
-			(src_rui_fmt->rui_nextents - 1) *
-			sizeof(struct xfs_map_extent);
+	len = xfs_rui_log_format_sizeof(src_rui_fmt->rui_nextents);
 
 	if (buf->i_len != len)
 		return -EFSCORRUPTED;
 
-	memcpy((char *)dst_rui_fmt, (char *)src_rui_fmt, len);
+	memcpy(dst_rui_fmt, src_rui_fmt, len);
 	return 0;
-}
-
-/*
- * Freeing the RUI requires that we remove it from the AIL if it has already
- * been placed there. However, the RUI may not yet have been placed in the AIL
- * when called by xfs_rui_release() from RUD processing due to the ordering of
- * committed vs unpin operations in bulk insert operations. Hence the reference
- * count to ensure only the last caller frees the RUI.
- */
-void
-xfs_rui_release(
-	struct xfs_rui_log_item	*ruip)
-{
-	if (atomic_dec_and_test(&ruip->rui_refcount)) {
-		xfs_trans_ail_remove(&ruip->rui_item, SHUTDOWN_LOG_IO_ERROR);
-		xfs_rui_item_free(ruip);
-	}
 }
 
 static inline struct xfs_rud_log_item *RUD_ITEM(struct xfs_log_item *lip)
@@ -347,7 +331,7 @@ xfs_rud_item_unlock(
 {
 	struct xfs_rud_log_item	*rudp = RUD_ITEM(lip);
 
-	if (lip->li_flags & XFS_LI_ABORTED) {
+	if (test_bit(XFS_LI_ABORTED, &lip->li_flags)) {
 		xfs_rui_release(rudp->rud_ruip);
 		kmem_zone_free(xfs_rud_zone, rudp);
 	}
@@ -459,8 +443,11 @@ xfs_rui_recover(
 				   XFS_FSB_TO_DADDR(mp, rmap->me_startblock));
 		switch (rmap->me_flags & XFS_RMAP_EXTENT_TYPE_MASK) {
 		case XFS_RMAP_EXTENT_MAP:
+		case XFS_RMAP_EXTENT_MAP_SHARED:
 		case XFS_RMAP_EXTENT_UNMAP:
+		case XFS_RMAP_EXTENT_UNMAP_SHARED:
 		case XFS_RMAP_EXTENT_CONVERT:
+		case XFS_RMAP_EXTENT_CONVERT_SHARED:
 		case XFS_RMAP_EXTENT_ALLOC:
 		case XFS_RMAP_EXTENT_FREE:
 			op_ok = true;
@@ -484,7 +471,8 @@ xfs_rui_recover(
 		}
 	}
 
-	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_itruncate, 0, 0, 0, &tp);
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_itruncate,
+			mp->m_rmap_maxlevels, 0, XFS_TRANS_RESERVE, &tp);
 	if (error)
 		return error;
 	rudp = xfs_trans_get_rud(tp, ruip);
@@ -499,11 +487,20 @@ xfs_rui_recover(
 		case XFS_RMAP_EXTENT_MAP:
 			type = XFS_RMAP_MAP;
 			break;
+		case XFS_RMAP_EXTENT_MAP_SHARED:
+			type = XFS_RMAP_MAP_SHARED;
+			break;
 		case XFS_RMAP_EXTENT_UNMAP:
 			type = XFS_RMAP_UNMAP;
 			break;
+		case XFS_RMAP_EXTENT_UNMAP_SHARED:
+			type = XFS_RMAP_UNMAP_SHARED;
+			break;
 		case XFS_RMAP_EXTENT_CONVERT:
 			type = XFS_RMAP_CONVERT;
+			break;
+		case XFS_RMAP_EXTENT_CONVERT_SHARED:
+			type = XFS_RMAP_CONVERT_SHARED;
 			break;
 		case XFS_RMAP_EXTENT_ALLOC:
 			type = XFS_RMAP_ALLOC;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -36,10 +37,9 @@
 
 #define DEBUG_SUBSYSTEM S_LLITE
 
-#include "../include/obd_support.h"
-#include "../include/lustre_lite.h"
-#include "../include/lustre/lustre_idl.h"
-#include "../include/lustre_dlm.h"
+#include <obd_support.h>
+#include <uapi/linux/lustre/lustre_idl.h>
+#include <lustre_dlm.h>
 
 #include "llite_internal.h"
 
@@ -58,9 +58,6 @@ static void ll_release(struct dentry *de)
 
 	LASSERT(de);
 	lld = ll_d2d(de);
-	if (!lld) /* NFS copies the de->d_op methods (bug 4655) */
-		return;
-
 	if (lld->lld_it) {
 		ll_intent_release(lld->lld_it);
 		kfree(lld->lld_it);
@@ -77,6 +74,12 @@ static void ll_release(struct dentry *de)
  * an AST before calling d_revalidate_it().  The dentry still exists (marked
  * INVALID) so d_lookup() matches it, but we have no lock on it (so
  * lock_match() fails) and we spin around real_lookup().
+ *
+ * This race doesn't apply to lookups in d_alloc_parallel(), and for
+ * those we want to ensure that only one dentry with a given name is
+ * in ll_lookup_nd() at a time.  So allow invalid dentries to match
+ * while d_in_lookup().  We will be called again when the lookup
+ * completes, and can give a different answer then.
  */
 static int ll_dcompare(const struct dentry *dentry,
 		       unsigned int len, const char *str,
@@ -93,46 +96,17 @@ static int ll_dcompare(const struct dentry *dentry,
 	       d_count(dentry));
 
 	/* mountpoint is always valid */
-	if (d_mountpoint((struct dentry *)dentry))
+	if (d_mountpoint(dentry))
+		return 0;
+
+	/* ensure exclusion against parallel lookup of the same name */
+	if (d_in_lookup((struct dentry *)dentry))
 		return 0;
 
 	if (d_lustre_invalid(dentry))
 		return 1;
 
 	return 0;
-}
-
-static inline int return_if_equal(struct ldlm_lock *lock, void *data)
-{
-	return (ldlm_is_canceling(lock) && ldlm_is_discard_data(lock)) ?
-		LDLM_ITER_CONTINUE : LDLM_ITER_STOP;
-}
-
-/* find any ldlm lock of the inode in mdc and lov
- * return 0    not find
- *	1    find one
- *      < 0    error
- */
-static int find_cbdata(struct inode *inode)
-{
-	struct ll_sb_info *sbi = ll_i2sbi(inode);
-	struct lov_stripe_md *lsm;
-	int rc = 0;
-
-	LASSERT(inode);
-	rc = md_find_cbdata(sbi->ll_md_exp, ll_inode2fid(inode),
-			    return_if_equal, NULL);
-	if (rc != 0)
-		return rc;
-
-	lsm = ccc_inode_lsm_get(inode);
-	if (!lsm)
-		return rc;
-
-	rc = obd_find_cbdata(sbi->ll_dt_exp, lsm, return_if_equal, NULL);
-	ccc_inode_lsm_put(inode, lsm);
-
-	return rc;
 }
 
 /**
@@ -147,7 +121,7 @@ static int ll_ddelete(const struct dentry *de)
 	LASSERT(de);
 
 	CDEBUG(D_DENTRY, "%s dentry %pd (%p, parent %p, inode %p) %s%s\n",
-	       d_lustre_invalid((struct dentry *)de) ? "deleting" : "keeping",
+	       d_lustre_invalid(de) ? "deleting" : "keeping",
 	       de, de, de->d_parent, d_inode(de),
 	       d_unhashed(de) ? "" : "hashed,",
 	       list_empty(&de->d_subdirs) ? "" : "subdirs");
@@ -155,48 +129,19 @@ static int ll_ddelete(const struct dentry *de)
 	/* kernel >= 2.6.38 last refcount is decreased after this function. */
 	LASSERT(d_count(de) == 1);
 
-	/* Disable this piece of code temporarily because this is called
-	 * inside dcache_lock so it's not appropriate to do lots of work
-	 * here. ATTENTION: Before this piece of code enabling, LU-2487 must be
-	 * resolved.
-	 */
-#if 0
-	/* if not ldlm lock for this inode, set i_nlink to 0 so that
-	 * this inode can be recycled later b=20433
-	 */
-	if (d_really_is_positive(de) && !find_cbdata(d_inode(de)))
-		clear_nlink(d_inode(de));
-#endif
-
-	if (d_lustre_invalid((struct dentry *)de))
+	if (d_lustre_invalid(de))
 		return 1;
 	return 0;
 }
 
-int ll_d_init(struct dentry *de)
+static int ll_d_init(struct dentry *de)
 {
-	CDEBUG(D_DENTRY, "ldd on dentry %pd (%p) parent %p inode %p refc %d\n",
-	       de, de, de->d_parent, d_inode(de), d_count(de));
+	struct ll_dentry_data *lld = kzalloc(sizeof(*lld), GFP_KERNEL);
 
-	if (!de->d_fsdata) {
-		struct ll_dentry_data *lld;
-
-		lld = kzalloc(sizeof(*lld), GFP_NOFS);
-		if (likely(lld)) {
-			spin_lock(&de->d_lock);
-			if (likely(!de->d_fsdata)) {
-				de->d_fsdata = lld;
-				__d_lustre_invalidate(de);
-			} else {
-				kfree(lld);
-			}
-			spin_unlock(&de->d_lock);
-		} else {
-			return -ENOMEM;
-		}
-	}
-	LASSERT(de->d_op == &ll_d_ops);
-
+	if (unlikely(!lld))
+		return -ENOMEM;
+	lld->lld_invalid = 1;
+	de->d_fsdata = lld;
 	return 0;
 }
 
@@ -207,7 +152,8 @@ void ll_intent_drop_lock(struct lookup_intent *it)
 
 		handle.cookie = it->it_lock_handle;
 
-		CDEBUG(D_DLMTRACE, "releasing lock with cookie %#llx from it %p\n",
+		CDEBUG(D_DLMTRACE,
+		       "releasing lock with cookie %#llx from it %p\n",
 		       handle.cookie, it);
 		ldlm_lock_decref(&handle, it->it_lock_mode);
 
@@ -218,7 +164,8 @@ void ll_intent_drop_lock(struct lookup_intent *it)
 		if (it->it_remote_lock_mode != 0) {
 			handle.cookie = it->it_remote_lock_handle;
 
-			CDEBUG(D_DLMTRACE, "releasing remote lock with cookie%#llx from it %p\n",
+			CDEBUG(D_DLMTRACE,
+			       "releasing remote lock with cookie%#llx from it %p\n",
 			       handle.cookie, it);
 			ldlm_lock_decref(&handle,
 					 it->it_remote_lock_mode);
@@ -246,12 +193,13 @@ void ll_invalidate_aliases(struct inode *inode)
 {
 	struct dentry *dentry;
 
-	CDEBUG(D_INODE, "marking dentries for ino "DFID"(%p) invalid\n",
+	CDEBUG(D_INODE, "marking dentries for ino " DFID "(%p) invalid\n",
 	       PFID(ll_inode2fid(inode)), inode);
 
 	spin_lock(&inode->i_lock);
 	hlist_for_each_entry(dentry, &inode->i_dentry, d_u.d_alias) {
-		CDEBUG(D_DENTRY, "dentry in drop %pd (%p) parent %p inode %p flags %d\n",
+		CDEBUG(D_DENTRY,
+		       "dentry in drop %pd (%p) parent %p inode %p flags %d\n",
 		       dentry, dentry, dentry->d_parent,
 		       d_inode(dentry), dentry->d_flags);
 
@@ -282,7 +230,7 @@ void ll_lookup_finish_locks(struct lookup_intent *it, struct inode *inode)
 	if (it->it_lock_mode && inode) {
 		struct ll_sb_info *sbi = ll_i2sbi(inode);
 
-		CDEBUG(D_DLMTRACE, "setting l_data to inode "DFID"(%p)\n",
+		CDEBUG(D_DLMTRACE, "setting l_data to inode " DFID "(%p)\n",
 		       PFID(ll_inode2fid(inode)), inode);
 		ll_set_lock_data(sbi->ll_md_exp, inode, it, NULL);
 	}
@@ -314,25 +262,21 @@ static int ll_revalidate_dentry(struct dentry *dentry,
 		return 1;
 
 	/*
-	 * if open&create is set, talk to MDS to make sure file is created if
-	 * necessary, because we can't do this in ->open() later since that's
-	 * called on an inode. return 0 here to let lookup to handle this.
+	 * VFS warns us that this is the second go around and previous
+	 * operation failed (most likely open|creat), so this time
+	 * we better talk to the server via the lookup path by name,
+	 * not by fid.
 	 */
-	if ((lookup_flags & (LOOKUP_OPEN | LOOKUP_CREATE)) ==
-	    (LOOKUP_OPEN | LOOKUP_CREATE))
+	if (lookup_flags & LOOKUP_REVAL)
 		return 0;
 
-	if (lookup_flags & (LOOKUP_PARENT | LOOKUP_OPEN | LOOKUP_CREATE))
-		return 1;
-
-	if (d_need_statahead(dir, dentry) <= 0)
+	if (!dentry_may_statahead(dir, dentry))
 		return 1;
 
 	if (lookup_flags & LOOKUP_RCU)
 		return -ECHILD;
 
-	do_statahead_enter(dir, &dentry, !d_inode(dentry));
-	ll_statahead_mark(dir, dentry);
+	ll_statahead(dir, &dentry, !d_inode(dentry));
 	return 1;
 }
 
@@ -347,18 +291,10 @@ static int ll_revalidate_nd(struct dentry *dentry, unsigned int flags)
 	return ll_revalidate_dentry(dentry, flags);
 }
 
-static void ll_d_iput(struct dentry *de, struct inode *inode)
-{
-	LASSERT(inode);
-	if (!find_cbdata(inode))
-		clear_nlink(inode);
-	iput(inode);
-}
-
 const struct dentry_operations ll_d_ops = {
+	.d_init = ll_d_init,
 	.d_revalidate = ll_revalidate_nd,
 	.d_release = ll_release,
 	.d_delete  = ll_ddelete,
-	.d_iput    = ll_d_iput,
 	.d_compare = ll_dcompare,
 };

@@ -1,17 +1,13 @@
-/*
- * Copyright (c) 2011-2014 Samsung Electronics Co., Ltd.
- *		http://www.samsung.com
- *
- * EXYNOS - Power Management support
- *
- * Based on arch/arm/mach-s3c2410/pm.c
- * Copyright (c) 2006 Simtec Electronics
- *	Ben Dooks <ben@simtec.co.uk>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
-*/
+// SPDX-License-Identifier: GPL-2.0
+//
+// Copyright (c) 2011-2014 Samsung Electronics Co., Ltd.
+//		http://www.samsung.com
+//
+// EXYNOS - Power Management support
+//
+// Based on arch/arm/mach-s3c2410/pm.c
+// Copyright (c) 2006 Simtec Electronics
+//	Ben Dooks <ben@simtec.co.uk>
 
 #include <linux/init.h>
 #include <linux/suspend.h>
@@ -132,7 +128,7 @@ static void exynos_set_wakeupmask(long mask)
 
 static void exynos_cpu_set_boot_vector(long flags)
 {
-	writel_relaxed(virt_to_phys(exynos_cpu_resume),
+	writel_relaxed(__pa_symbol(exynos_cpu_resume),
 		       exynos_boot_vector_addr());
 	writel_relaxed(flags, exynos_boot_vector_flag());
 }
@@ -167,8 +163,7 @@ void exynos_enter_aftr(void)
 
 	exynos_pm_central_suspend();
 
-	if (of_machine_is_compatible("samsung,exynos4212") ||
-	    of_machine_is_compatible("samsung,exynos4412")) {
+	if (soc_is_exynos4412()) {
 		/* Setting SEQ_OPTION register */
 		pmu_raw_writel(S5P_USE_STANDBY_WFI0 | S5P_USE_STANDBY_WFE0,
 			       S5P_CENTRAL_SEQ_OPTION);
@@ -238,7 +233,7 @@ static int exynos_cpu0_enter_aftr(void)
 
 abort:
 	if (cpu_online(1)) {
-		unsigned long boot_addr = virt_to_phys(exynos_cpu_resume);
+		unsigned long boot_addr = __pa_symbol(exynos_cpu_resume);
 
 		/*
 		 * Set the boot vector to something non-zero
@@ -276,11 +271,7 @@ abort:
 				goto fail;
 
 			call_firmware_op(cpu_boot, 1);
-
-			if (soc_is_exynos3250())
-				dsb_sev();
-			else
-				arch_send_wakeup_ipi_mask(cpumask_of(1));
+			dsb_sev();
 		}
 	}
 fail:
@@ -330,7 +321,7 @@ cpu1_aborted:
 
 static void exynos_pre_enter_aftr(void)
 {
-	unsigned long boot_addr = virt_to_phys(exynos_cpu_resume);
+	unsigned long boot_addr = __pa_symbol(exynos_cpu_resume);
 
 	(void)exynos_set_boot_addr(1, boot_addr);
 }

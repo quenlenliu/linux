@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -32,15 +33,16 @@
 
 #define DEBUG_SUBSYSTEM S_SEC
 
-#include "../../include/linux/libcfs/libcfs.h"
+#include <linux/libcfs/libcfs.h>
 #include <linux/crypto.h>
 #include <linux/key.h>
 
-#include "../include/obd.h"
-#include "../include/obd_support.h"
-#include "../include/lustre_import.h"
-#include "../include/lustre_param.h"
-#include "../include/lustre_sec.h"
+#include <obd.h>
+#include <obd_class.h>
+#include <obd_support.h>
+#include <lustre_import.h>
+#include <uapi/linux/lustre/lustre_param.h>
+#include <lustre_sec.h>
 
 #include "ptlrpc_internal.h"
 
@@ -58,7 +60,6 @@ enum lustre_sec_part sptlrpc_target_sec_part(struct obd_device *obd)
 	CERROR("unknown target %p(%s)\n", obd, type);
 	return LUSTRE_SP_ANY;
 }
-EXPORT_SYMBOL(sptlrpc_target_sec_part);
 
 /****************************************
  * user supplied flavor string parsing  *

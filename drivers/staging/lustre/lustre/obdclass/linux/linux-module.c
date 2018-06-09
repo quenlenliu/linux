@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -60,12 +61,91 @@
 #include <linux/seq_file.h>
 #include <linux/kobject.h>
 
-#include "../../../include/linux/libcfs/libcfs.h"
-#include "../../../include/linux/lnet/lnetctl.h"
-#include "../../include/obd_support.h"
-#include "../../include/obd_class.h"
-#include "../../include/lprocfs_status.h"
-#include "../../include/lustre_ver.h"
+#include <linux/libcfs/libcfs.h>
+#include <uapi/linux/lnet/lnetctl.h>
+#include <obd_support.h>
+#include <obd_class.h>
+#include <lprocfs_status.h>
+#include <uapi/linux/lustre/lustre_ioctl.h>
+#include <uapi/linux/lustre/lustre_ver.h>
+
+#define OBD_MAX_IOCTL_BUFFER	8192
+
+static int obd_ioctl_is_invalid(struct obd_ioctl_data *data)
+{
+	if (data->ioc_len > BIT(30)) {
+		CERROR("OBD ioctl: ioc_len larger than 1<<30\n");
+		return 1;
+	}
+
+	if (data->ioc_inllen1 > BIT(30)) {
+		CERROR("OBD ioctl: ioc_inllen1 larger than 1<<30\n");
+		return 1;
+	}
+
+	if (data->ioc_inllen2 > BIT(30)) {
+		CERROR("OBD ioctl: ioc_inllen2 larger than 1<<30\n");
+		return 1;
+	}
+
+	if (data->ioc_inllen3 > BIT(30)) {
+		CERROR("OBD ioctl: ioc_inllen3 larger than 1<<30\n");
+		return 1;
+	}
+
+	if (data->ioc_inllen4 > BIT(30)) {
+		CERROR("OBD ioctl: ioc_inllen4 larger than 1<<30\n");
+		return 1;
+	}
+
+	if (data->ioc_inlbuf1 && data->ioc_inllen1 == 0) {
+		CERROR("OBD ioctl: inlbuf1 pointer but 0 length\n");
+		return 1;
+	}
+
+	if (data->ioc_inlbuf2 && data->ioc_inllen2 == 0) {
+		CERROR("OBD ioctl: inlbuf2 pointer but 0 length\n");
+		return 1;
+	}
+
+	if (data->ioc_inlbuf3 && data->ioc_inllen3 == 0) {
+		CERROR("OBD ioctl: inlbuf3 pointer but 0 length\n");
+		return 1;
+	}
+
+	if (data->ioc_inlbuf4 && data->ioc_inllen4 == 0) {
+		CERROR("OBD ioctl: inlbuf4 pointer but 0 length\n");
+		return 1;
+	}
+
+	if (data->ioc_pbuf1 && data->ioc_plen1 == 0) {
+		CERROR("OBD ioctl: pbuf1 pointer but 0 length\n");
+		return 1;
+	}
+
+	if (data->ioc_pbuf2 && data->ioc_plen2 == 0) {
+		CERROR("OBD ioctl: pbuf2 pointer but 0 length\n");
+		return 1;
+	}
+
+	if (!data->ioc_pbuf1 && data->ioc_plen1 != 0) {
+		CERROR("OBD ioctl: plen1 set but NULL pointer\n");
+		return 1;
+	}
+
+	if (!data->ioc_pbuf2 && data->ioc_plen2 != 0) {
+		CERROR("OBD ioctl: plen2 set but NULL pointer\n");
+		return 1;
+	}
+
+	if (obd_ioctl_packlen(data) > data->ioc_len) {
+		CERROR("OBD ioctl: packlen exceeds ioc_len (%d > %d)\n",
+		obd_ioctl_packlen(data), data->ioc_len);
+		return 1;
+	}
+
+	return 0;
+}
 
 /* buffer MUST be at least the size of obd_ioctl_hdr */
 int obd_ioctl_getdata(char **buf, int *len, void __user *arg)
@@ -100,7 +180,7 @@ int obd_ioctl_getdata(char **buf, int *len, void __user *arg)
 	 * obdfilter-survey is an example, which relies on ioctl. So we'd
 	 * better avoid vmalloc on ioctl path. LU-66
 	 */
-	*buf = libcfs_kvzalloc(hdr.ioc_len, GFP_NOFS);
+	*buf = kvzalloc(hdr.ioc_len, GFP_KERNEL);
 	if (!*buf) {
 		CERROR("Cannot allocate control buffer of len %d\n",
 		       hdr.ioc_len);
@@ -150,15 +230,6 @@ free_buf:
 }
 EXPORT_SYMBOL(obd_ioctl_getdata);
 
-int obd_ioctl_popdata(void __user *arg, void *data, int len)
-{
-	int err;
-
-	err = copy_to_user(arg, data, len) ? -EFAULT : 0;
-	return err;
-}
-EXPORT_SYMBOL(obd_ioctl_popdata);
-
 /*  opening /dev/obd */
 static int obd_class_open(struct inode *inode, struct file *file)
 {
@@ -180,7 +251,7 @@ static long obd_class_ioctl(struct file *filp, unsigned int cmd,
 	int err = 0;
 
 	/* Allow non-root access for OBD_IOC_PING_TARGET - used by lfs check */
-	if (!capable(CFS_CAP_SYS_ADMIN) && (cmd != OBD_IOC_PING_TARGET))
+	if (!capable(CAP_SYS_ADMIN) && (cmd != OBD_IOC_PING_TARGET))
 		return err = -EACCES;
 	if ((cmd & 0xffffff00) == ((int)'T') << 8) /* ignore all tty ioctls */
 		return err = -ENOTTY;
@@ -191,7 +262,7 @@ static long obd_class_ioctl(struct file *filp, unsigned int cmd,
 }
 
 /* declare character device */
-static struct file_operations obd_psdev_fops = {
+static const struct file_operations obd_psdev_fops = {
 	.owner	  = THIS_MODULE,
 	.unlocked_ioctl = obd_class_ioctl, /* unlocked_ioctl */
 	.open	   = obd_class_open,      /* open */
@@ -217,8 +288,8 @@ static ssize_t pinger_show(struct kobject *kobj, struct attribute *attr,
 	return sprintf(buf, "%s\n", "on");
 }
 
-static ssize_t health_show(struct kobject *kobj, struct attribute *attr,
-			   char *buf)
+static ssize_t
+health_check_show(struct kobject *kobj, struct attribute *attr, char *buf)
 {
 	bool healthy = true;
 	int i;
@@ -291,7 +362,7 @@ static ssize_t jobid_name_store(struct kobject *kobj, struct attribute *attr,
 				const char *buffer,
 				size_t count)
 {
-	if (!count || count > JOBSTATS_JOBID_SIZE)
+	if (!count || count > LUSTRE_JOBID_SIZE)
 		return -EINVAL;
 
 	memcpy(obd_jobid_node, buffer, count);
@@ -311,14 +382,14 @@ EXPORT_SYMBOL_GPL(debugfs_lustre_root);
 
 LUSTRE_RO_ATTR(version);
 LUSTRE_RO_ATTR(pinger);
-LUSTRE_RO_ATTR(health);
+LUSTRE_RO_ATTR(health_check);
 LUSTRE_RW_ATTR(jobid_var);
 LUSTRE_RW_ATTR(jobid_name);
 
 static struct attribute *lustre_attrs[] = {
 	&lustre_attr_version.attr,
 	&lustre_attr_pinger.attr,
-	&lustre_attr_health.attr,
+	&lustre_attr_health_check.attr,
 	&lustre_attr_jobid_name.attr,
 	&lustre_attr_jobid_var.attr,
 	NULL,
@@ -405,7 +476,7 @@ static const struct file_operations obd_device_list_fops = {
 struct kobject *lustre_kobj;
 EXPORT_SYMBOL_GPL(lustre_kobj);
 
-static struct attribute_group lustre_attr_group = {
+static const struct attribute_group lustre_attr_group = {
 	.attrs = lustre_attrs,
 };
 
@@ -430,6 +501,7 @@ int class_procfs_init(void)
 		rc = debugfs_lustre_root ? PTR_ERR(debugfs_lustre_root)
 					 : -ENOMEM;
 		debugfs_lustre_root = NULL;
+		sysfs_remove_group(lustre_kobj, &lustre_attr_group);
 		kobject_put(lustre_kobj);
 		goto out;
 	}
@@ -438,6 +510,7 @@ int class_procfs_init(void)
 				   &obd_device_list_fops);
 	if (IS_ERR_OR_NULL(file)) {
 		rc = file ? PTR_ERR(file) : -ENOMEM;
+		sysfs_remove_group(lustre_kobj, &lustre_attr_group);
 		kobject_put(lustre_kobj);
 		goto out;
 	}
@@ -451,6 +524,7 @@ int class_procfs_clean(void)
 
 	debugfs_lustre_root = NULL;
 
+	sysfs_remove_group(lustre_kobj, &lustre_attr_group);
 	kobject_put(lustre_kobj);
 
 	return 0;

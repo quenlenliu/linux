@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -42,9 +43,9 @@
  * @{
  */
 
-#include "lprocfs_status.h"
-#include "lustre/lustre_idl.h"
-#include "lustre_dlm.h"
+#include <lprocfs_status.h>
+#include <uapi/linux/lustre/lustre_idl.h>
+#include <lustre_dlm.h>
 
 enum obd_option {
 	OBD_OPT_FORCE =	 0x0001,
@@ -86,6 +87,8 @@ struct obd_export {
 	struct obd_uuid	   exp_client_uuid;
 	/** To link all exports on an obd device */
 	struct list_head		exp_obd_chain;
+	/** work_struct for destruction of export */
+	struct work_struct	exp_zombie_work;
 	struct hlist_node	  exp_uuid_hash; /** uuid-export hash*/
 	/** Obd device of this export */
 	struct obd_device	*exp_obd;

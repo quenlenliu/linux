@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * gsc_hpdi.c
  * Comedi driver the General Standards Corporation
@@ -8,16 +9,6 @@
  *
  * COMEDI - Linux Control and Measurement Device Interface
  * Copyright (C) 1997-8 David A. Schleef <ds@schleef.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 /*
@@ -582,7 +573,7 @@ static void gsc_hpdi_init_plx9080(struct comedi_device *dev)
 	bits |= PLX_DMAMODE_DEMAND;
 	/* enable local burst mode */
 	bits |= PLX_DMAMODE_BURSTEN;
-	bits |= PLX_DMAMODE_WIDTH32;
+	bits |= PLX_DMAMODE_WIDTH_32;
 	writel(bits, plx_iobase + PLX_REG_DMAMODE0);
 }
 

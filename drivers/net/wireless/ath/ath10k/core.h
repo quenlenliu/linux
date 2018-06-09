@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2005-2011 Atheros Communications Inc.
- * Copyright (c) 2011-2013 Qualcomm Atheros, Inc.
+ * Copyright (c) 2011-2017 Qualcomm Atheros, Inc.
+ * Copyright (c) 2018, The Linux Foundation. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -43,13 +44,16 @@
 #define WO(_f)      ((_f##_OFFSET) >> 2)
 
 #define ATH10K_SCAN_ID 0
+#define ATH10K_SCAN_CHANNEL_SWITCH_WMI_EVT_OVERHEAD 10 /* msec */
 #define WMI_READY_TIMEOUT (5 * HZ)
 #define ATH10K_FLUSH_TIMEOUT_HZ (5 * HZ)
 #define ATH10K_CONNECTION_LOSS_HZ (3 * HZ)
-#define ATH10K_NUM_CHANS 39
+#define ATH10K_NUM_CHANS 40
 
 /* Antenna noise floor */
 #define ATH10K_DEFAULT_NOISE_FLOOR -95
+
+#define ATH10K_INVALID_RSSI 128
 
 #define ATH10K_MAX_NUM_MGMT_PENDING 128
 
@@ -65,11 +69,34 @@
 #define ATH10K_KEEPALIVE_MAX_IDLE 3895
 #define ATH10K_KEEPALIVE_MAX_UNRESPONSIVE 3900
 
+/* NAPI poll budget */
+#define ATH10K_NAPI_BUDGET      64
+
+/* SMBIOS type containing Board Data File Name Extension */
+#define ATH10K_SMBIOS_BDF_EXT_TYPE 0xF8
+
+/* SMBIOS type structure length (excluding strings-set) */
+#define ATH10K_SMBIOS_BDF_EXT_LENGTH 0x9
+
+/* Offset pointing to Board Data File Name Extension */
+#define ATH10K_SMBIOS_BDF_EXT_OFFSET 0x8
+
+/* Board Data File Name Extension string length.
+ * String format: BDF_<Customer ID>_<Extension>\0
+ */
+#define ATH10K_SMBIOS_BDF_EXT_STR_LENGTH 0x20
+
+/* The magic used by QCA spec */
+#define ATH10K_SMBIOS_BDF_EXT_MAGIC "BDF_"
+
 struct ath10k;
 
 enum ath10k_bus {
 	ATH10K_BUS_PCI,
 	ATH10K_BUS_AHB,
+	ATH10K_BUS_SDIO,
+	ATH10K_BUS_USB,
+	ATH10K_BUS_SNOC,
 };
 
 static inline const char *ath10k_bus_str(enum ath10k_bus bus)
@@ -79,6 +106,12 @@ static inline const char *ath10k_bus_str(enum ath10k_bus bus)
 		return "pci";
 	case ATH10K_BUS_AHB:
 		return "ahb";
+	case ATH10K_BUS_SDIO:
+		return "sdio";
+	case ATH10K_BUS_USB:
+		return "usb";
+	case ATH10K_BUS_SNOC:
+		return "snoc";
 	}
 
 	return "unknown";
@@ -142,6 +175,8 @@ struct ath10k_wmi {
 	enum ath10k_htc_ep_id eid;
 	struct completion service_ready;
 	struct completion unified_ready;
+	struct completion barrier;
+	struct completion radar_confirm;
 	wait_queue_head_t tx_credits_wq;
 	DECLARE_BITMAP(svc_map, WMI_SERVICE_MAX);
 	struct wmi_cmd_map *cmd;
@@ -191,15 +226,36 @@ struct ath10k_fw_stats_vdev {
 	u32 beacon_rssi_history[10];
 };
 
+struct ath10k_fw_stats_vdev_extd {
+	struct list_head list;
+
+	u32 vdev_id;
+	u32 ppdu_aggr_cnt;
+	u32 ppdu_noack;
+	u32 mpdu_queued;
+	u32 ppdu_nonaggr_cnt;
+	u32 mpdu_sw_requeued;
+	u32 mpdu_suc_retry;
+	u32 mpdu_suc_multitry;
+	u32 mpdu_fail_retry;
+	u32 tx_ftm_suc;
+	u32 tx_ftm_suc_retry;
+	u32 tx_ftm_fail;
+	u32 rx_ftmr_cnt;
+	u32 rx_ftmr_dup_cnt;
+	u32 rx_iftmr_cnt;
+	u32 rx_iftmr_dup_cnt;
+};
+
 struct ath10k_fw_stats_pdev {
 	struct list_head list;
 
 	/* PDEV stats */
 	s32 ch_noise_floor;
-	u32 tx_frame_count;
-	u32 rx_frame_count;
-	u32 rx_clear_count;
-	u32 cycle_count;
+	u32 tx_frame_count; /* Cycles spent transmitting frames */
+	u32 rx_frame_count; /* Cycles spent receiving frames */
+	u32 rx_clear_count; /* Total channel busy time, evidently */
+	u32 cycle_count; /* Total on-channel time */
 	u32 phy_err_count;
 	u32 chan_tx_power;
 	u32 ack_rx_bad;
@@ -294,12 +350,48 @@ struct ath10k_tpc_stats {
 	struct ath10k_tpc_table tpc_table[WMI_TPC_FLAG];
 };
 
+struct ath10k_tpc_table_final {
+	u32 pream_idx[WMI_TPC_FINAL_RATE_MAX];
+	u8 rate_code[WMI_TPC_FINAL_RATE_MAX];
+	char tpc_value[WMI_TPC_FINAL_RATE_MAX][WMI_TPC_TX_N_CHAIN * WMI_TPC_BUF_SIZE];
+};
+
+struct ath10k_tpc_stats_final {
+	u32 reg_domain;
+	u32 chan_freq;
+	u32 phy_mode;
+	u32 twice_antenna_reduction;
+	u32 twice_max_rd_power;
+	s32 twice_antenna_gain;
+	u32 power_limit;
+	u32 num_tx_chain;
+	u32 ctl;
+	u32 rate_max;
+	u8 flag[WMI_TPC_FLAG];
+	struct ath10k_tpc_table_final tpc_table_final[WMI_TPC_FLAG];
+};
+
 struct ath10k_dfs_stats {
 	u32 phy_errors;
 	u32 pulses_total;
 	u32 pulses_detected;
 	u32 pulses_discarded;
 	u32 radar_detected;
+};
+
+enum ath10k_radar_confirmation_state {
+	ATH10K_RADAR_CONFIRMATION_IDLE = 0,
+	ATH10K_RADAR_CONFIRMATION_INPROGRESS,
+	ATH10K_RADAR_CONFIRMATION_STOPPED,
+};
+
+struct ath10k_radar_found_info {
+	u32 pri_min;
+	u32 pri_max;
+	u32 width_min;
+	u32 width_max;
+	u32 sidx_min;
+	u32 sidx_max;
 };
 
 #define ATH10K_MAX_NUM_PEER_IDS (1 << 11) /* htt rx_desc limit */
@@ -309,6 +401,7 @@ struct ath10k_peer {
 	struct ieee80211_vif *vif;
 	struct ieee80211_sta *sta;
 
+	bool removed;
 	int vdev_id;
 	u8 addr[ETH_ALEN];
 	DECLARE_BITMAP(peer_ids, ATH10K_MAX_NUM_PEER_IDS);
@@ -323,6 +416,45 @@ struct ath10k_txq {
 	unsigned long num_push_allowed;
 };
 
+enum ath10k_pkt_rx_err {
+	ATH10K_PKT_RX_ERR_FCS,
+	ATH10K_PKT_RX_ERR_TKIP,
+	ATH10K_PKT_RX_ERR_CRYPT,
+	ATH10K_PKT_RX_ERR_PEER_IDX_INVAL,
+	ATH10K_PKT_RX_ERR_MAX,
+};
+
+enum ath10k_ampdu_subfrm_num {
+	ATH10K_AMPDU_SUBFRM_NUM_10,
+	ATH10K_AMPDU_SUBFRM_NUM_20,
+	ATH10K_AMPDU_SUBFRM_NUM_30,
+	ATH10K_AMPDU_SUBFRM_NUM_40,
+	ATH10K_AMPDU_SUBFRM_NUM_50,
+	ATH10K_AMPDU_SUBFRM_NUM_60,
+	ATH10K_AMPDU_SUBFRM_NUM_MORE,
+	ATH10K_AMPDU_SUBFRM_NUM_MAX,
+};
+
+enum ath10k_amsdu_subfrm_num {
+	ATH10K_AMSDU_SUBFRM_NUM_1,
+	ATH10K_AMSDU_SUBFRM_NUM_2,
+	ATH10K_AMSDU_SUBFRM_NUM_3,
+	ATH10K_AMSDU_SUBFRM_NUM_4,
+	ATH10K_AMSDU_SUBFRM_NUM_MORE,
+	ATH10K_AMSDU_SUBFRM_NUM_MAX,
+};
+
+struct ath10k_sta_tid_stats {
+	unsigned long int rx_pkt_from_fw;
+	unsigned long int rx_pkt_unchained;
+	unsigned long int rx_pkt_drop_chained;
+	unsigned long int rx_pkt_drop_filter;
+	unsigned long int rx_pkt_err[ATH10K_PKT_RX_ERR_MAX];
+	unsigned long int rx_pkt_queued_for_mac;
+	unsigned long int rx_pkt_ampdu[ATH10K_AMPDU_SUBFRM_NUM_MAX];
+	unsigned long int rx_pkt_amsdu[ATH10K_AMSDU_SUBFRM_NUM_MAX];
+};
+
 struct ath10k_sta {
 	struct ath10k_vif *arvif;
 
@@ -332,13 +464,17 @@ struct ath10k_sta {
 	u32 nss;
 	u32 smps;
 	u16 peer_id;
+	struct rate_info txrate;
 
 	struct work_struct update_wk;
+	u64 rx_duration;
 
 #ifdef CONFIG_MAC80211_DEBUGFS
 	/* protected by conf_mutex */
 	bool aggr_mode;
-	u64 rx_duration;
+
+	/* Protected with ar->data_lock */
+	struct ath10k_sta_tid_stats tid_stats[IEEE80211_NUM_TIDS + 1];
 #endif
 };
 
@@ -413,13 +549,32 @@ struct ath10k_vif_iter {
 	struct ath10k_vif *arvif;
 };
 
+/* Copy Engine register dump, protected by ce-lock */
+struct ath10k_ce_crash_data {
+	__le32 base_addr;
+	__le32 src_wr_idx;
+	__le32 src_r_idx;
+	__le32 dst_wr_idx;
+	__le32 dst_r_idx;
+};
+
+struct ath10k_ce_crash_hdr {
+	__le32 ce_count;
+	__le32 reserved[3]; /* for future use */
+	struct ath10k_ce_crash_data entries[];
+};
+
+#define MAX_MEM_DUMP_TYPE	5
+
 /* used for crash-dump storage, protected by data-lock */
 struct ath10k_fw_crash_data {
-	bool crashed_since_read;
-
-	uuid_le uuid;
-	struct timespec timestamp;
+	guid_t guid;
+	struct timespec64 timestamp;
 	__le32 registers[REG_DUMP_COUNT_QCA988X];
+	struct ath10k_ce_crash_data ce_crash_data[CE_COUNT_MAX];
+
+	u8 *ramdump_buf;
+	size_t ramdump_buf_len;
 };
 
 struct ath10k_debug {
@@ -436,17 +591,16 @@ struct ath10k_debug {
 
 	/* used for tpc-dump storage, protected by data-lock */
 	struct ath10k_tpc_stats *tpc_stats;
+	struct ath10k_tpc_stats_final *tpc_stats_final;
 
 	struct completion tpc_complete;
 
 	/* protected by conf_mutex */
-	u32 fw_dbglog_mask;
+	u64 fw_dbglog_mask;
 	u32 fw_dbglog_level;
-	u32 pktlog_filter;
 	u32 reg_addr;
 	u32 nf_cal_period;
-
-	struct ath10k_fw_crash_data *fw_crash_data;
+	void *cal_data;
 };
 
 enum ath10k_state {
@@ -460,14 +614,16 @@ enum ath10k_state {
 	 * stopped in ath10k_core_restart() work holding conf_mutex. The state
 	 * RESTARTED means that the device is up and mac80211 has started hw
 	 * reconfiguration. Once mac80211 is done with the reconfiguration we
-	 * set the state to STATE_ON in reconfig_complete(). */
+	 * set the state to STATE_ON in reconfig_complete().
+	 */
 	ATH10K_STATE_RESTARTING,
 	ATH10K_STATE_RESTARTED,
 
 	/* The device has crashed while restarting hw. This state is like ON
 	 * but commands are blocked in HTC and -ECOMM response is given. This
 	 * prevents completion timeouts and makes the driver more responsive to
-	 * userspace commands. This is also prevents recursive recovery. */
+	 * userspace commands. This is also prevents recursive recovery.
+	 */
 	ATH10K_STATE_WEDGED,
 
 	/* factory tests */
@@ -550,6 +706,27 @@ enum ath10k_fw_features {
 	 * is used to configure WMI_COEX_GPIO_SUPPORT.
 	 */
 	ATH10K_FW_FEATURE_BTCOEX_PARAM = 14,
+
+	/* Unused flag and proven to be not working, enable this if you want
+	 * to experiment sending NULL func data frames in HTT TX
+	 */
+	ATH10K_FW_FEATURE_SKIP_NULL_FUNC_WAR = 15,
+
+	/* Firmware allow other BSS mesh broadcast/multicast frames without
+	 * creating monitor interface. Appropriate rxfilters are programmed for
+	 * mesh vdev by firmware itself. This feature flags will be used for
+	 * not creating monitor vdev while configuring mesh node.
+	 */
+	ATH10K_FW_FEATURE_ALLOWS_MESH_BCAST = 16,
+
+	/* Firmware does not support power save in station mode. */
+	ATH10K_FW_FEATURE_NO_PS = 17,
+
+	/* Firmware allows management tx by reference instead of by value. */
+	ATH10K_FW_FEATURE_MGMT_TX_BY_REF = 18,
+
+	/* Firmware load is done externally, not by bmi */
+	ATH10K_FW_FEATURE_NON_BMI = 19,
 
 	/* keep last */
 	ATH10K_FW_FEATURE_COUNT,
@@ -663,6 +840,15 @@ struct ath10k_fw_file {
 
 	const void *codeswap_data;
 	size_t codeswap_len;
+
+	/* The original idea of struct ath10k_fw_file was that it only
+	 * contains struct firmware and pointers to various parts (actual
+	 * firmware binary, otp, metadata etc) of the file. This seg_info
+	 * is actually created separate but as this is used similarly as
+	 * the other firmware components it's more convenient to have it
+	 * here.
+	 */
+	struct ath10k_swap_code_seg_info *firmware_swap_code_seg_info;
 };
 
 struct ath10k_fw_components {
@@ -671,6 +857,21 @@ struct ath10k_fw_components {
 	size_t board_len;
 
 	struct ath10k_fw_file fw_file;
+};
+
+struct ath10k_per_peer_tx_stats {
+	u32	succ_bytes;
+	u32	retry_bytes;
+	u32	failed_bytes;
+	u8	ratecode;
+	u8	flags;
+	u16	peer_id;
+	u16	succ_pkts;
+	u16	retry_pkts;
+	u16	failed_pkts;
+	u16	duration;
+	u32	reserved1;
+	u32	reserved2;
 };
 
 struct ath10k {
@@ -692,11 +893,14 @@ struct ath10k {
 	u32 phy_capability;
 	u32 hw_min_tx_power;
 	u32 hw_max_tx_power;
+	u32 hw_eeprom_rd;
 	u32 ht_cap_info;
 	u32 vht_cap_info;
 	u32 num_rf_chains;
 	u32 max_spatial_stream;
 	/* protected by conf_mutex */
+	u32 low_5ghz_chan;
+	u32 high_5ghz_chan;
 	bool ani_enabled;
 
 	bool p2p;
@@ -709,59 +913,14 @@ struct ath10k {
 	struct completion target_suspend;
 
 	const struct ath10k_hw_regs *regs;
+	const struct ath10k_hw_ce_regs *hw_ce_regs;
 	const struct ath10k_hw_values *hw_values;
 	struct ath10k_bmi bmi;
 	struct ath10k_wmi wmi;
 	struct ath10k_htc htc;
 	struct ath10k_htt htt;
 
-	struct ath10k_hw_params {
-		u32 id;
-		u16 dev_id;
-		const char *name;
-		u32 patch_load_addr;
-		int uart_pin;
-		u32 otp_exe_param;
-
-		/* Type of hw cycle counter wraparound logic, for more info
-		 * refer enum ath10k_hw_cc_wraparound_type.
-		 */
-		enum ath10k_hw_cc_wraparound_type cc_wraparound_type;
-
-		/* Some of chip expects fragment descriptor to be continuous
-		 * memory for any TX operation. Set continuous_frag_desc flag
-		 * for the hardware which have such requirement.
-		 */
-		bool continuous_frag_desc;
-
-		/* CCK hardware rate table mapping for the newer chipsets
-		 * like QCA99X0, QCA4019 got revised. The CCK h/w rate values
-		 * are in a proper order with respect to the rate/preamble
-		 */
-		bool cck_rate_map_rev2;
-
-		u32 channel_counters_freq_hz;
-
-		/* Mgmt tx descriptors threshold for limiting probe response
-		 * frames.
-		 */
-		u32 max_probe_resp_desc_thres;
-
-		/* The padding bytes's location is different on various chips */
-		enum ath10k_hw_4addr_pad hw_4addr_pad;
-
-		u32 tx_chain_mask;
-		u32 rx_chain_mask;
-		u32 max_spatial_stream;
-		u32 cal_data_len;
-
-		struct ath10k_hw_params_fw {
-			const char *dir;
-			const char *board;
-			size_t board_size;
-			size_t board_ext_size;
-		} fw;
-	} hw_params;
+	struct ath10k_hw_params hw_params;
 
 	/* contains the firmware images used with ATH10K_FIRMWARE_MODE_NORMAL */
 	struct ath10k_fw_components normal_mode_fw;
@@ -775,10 +934,6 @@ struct ath10k {
 	const struct firmware *cal_file;
 
 	struct {
-		struct ath10k_swap_code_seg_info *firmware_swap_code_seg_info;
-	} swap;
-
-	struct {
 		u32 vendor;
 		u32 device;
 		u32 subsystem_vendor;
@@ -787,6 +942,8 @@ struct ath10k {
 		bool bmi_ids_valid;
 		u8 bmi_board_id;
 		u8 bmi_chip_id;
+
+		char bdf_ext[ATH10K_SMBIOS_BDF_EXT_STR_LENGTH];
 	} id;
 
 	int fw_api;
@@ -888,7 +1045,8 @@ struct ath10k {
 	struct work_struct restart_work;
 
 	/* cycle count is reported twice for each visited channel during scan.
-	 * access protected by data_lock */
+	 * access protected by data_lock
+	 */
 	u32 survey_last_rx_clear_count;
 	u32 survey_last_cycle_count;
 	struct survey_info survey[ATH10K_NUM_CHANS];
@@ -918,6 +1076,14 @@ struct ath10k {
 	} spectral;
 #endif
 
+	u32 pktlog_filter;
+
+#ifdef CONFIG_DEV_COREDUMP
+	struct {
+		struct ath10k_fw_crash_data *fw_crash_data;
+	} coredump;
+#endif
+
 	struct {
 		/* protected by conf_mutex */
 		struct ath10k_fw_components utf_mode_fw;
@@ -935,6 +1101,35 @@ struct ath10k {
 
 	struct ath10k_thermal thermal;
 	struct ath10k_wow wow;
+	struct ath10k_per_peer_tx_stats peer_tx_stats;
+
+	/* NAPI */
+	struct net_device napi_dev;
+	struct napi_struct napi;
+
+	struct work_struct set_coverage_class_work;
+	/* protected by conf_mutex */
+	struct {
+		/* writing also protected by data_lock */
+		s16 coverage_class;
+
+		u32 reg_phyclk;
+		u32 reg_slottime_conf;
+		u32 reg_slottime_orig;
+		u32 reg_ack_cts_timeout_conf;
+		u32 reg_ack_cts_timeout_orig;
+	} fw_coverage;
+
+	u32 ampdu_reference;
+
+	void *ce_priv;
+
+	u32 sta_tid_stats_mask;
+
+	/* protected by data_lock */
+	enum ath10k_radar_confirmation_state radar_conf_state;
+	struct ath10k_radar_found_info last_radar_info;
+	struct work_struct radar_confirmation_work;
 
 	/* must be last */
 	u8 drv_priv[0] __aligned(sizeof(void *));
@@ -948,6 +1143,8 @@ static inline bool ath10k_peer_stats_enabled(struct ath10k *ar)
 
 	return false;
 }
+
+extern unsigned long ath10k_coredump_mask;
 
 struct ath10k *ath10k_core_create(size_t priv_size, struct device *dev,
 				  enum ath10k_bus bus,

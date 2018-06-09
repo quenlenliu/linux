@@ -9,6 +9,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
+#include <linux/platform_device.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
@@ -76,8 +77,6 @@ static void *m68k_dma_alloc(struct device *dev, size_t size,
 		dma_addr_t *dma_handle, gfp_t gfp, unsigned long attrs)
 {
 	void *ret;
-	/* ignore region specifiers */
-	gfp &= ~(__GFP_DMA | __GFP_HIGHMEM);
 
 	if (dev == NULL || (*dev->dma_mask < 0xffffffff))
 		gfp |= GFP_DMA;
@@ -110,8 +109,8 @@ static void m68k_dma_sync_single_for_device(struct device *dev,
 		cache_clear(handle, size);
 		break;
 	default:
-		if (printk_ratelimit())
-			printk("dma_sync_single_for_device: unsupported dir %u\n", dir);
+		pr_err_ratelimited("dma_sync_single_for_device: unsupported dir %u\n",
+				   dir);
 		break;
 	}
 }
@@ -134,7 +133,9 @@ static dma_addr_t m68k_dma_map_page(struct device *dev, struct page *page,
 {
 	dma_addr_t handle = page_to_phys(page) + offset;
 
-	dma_sync_single_for_device(dev, handle, size, dir);
+	if (!(attrs & DMA_ATTR_SKIP_CPU_SYNC))
+		dma_sync_single_for_device(dev, handle, size, dir);
+
 	return handle;
 }
 
@@ -146,13 +147,17 @@ static int m68k_dma_map_sg(struct device *dev, struct scatterlist *sglist,
 
 	for_each_sg(sglist, sg, nents, i) {
 		sg->dma_address = sg_phys(sg);
+
+		if (attrs & DMA_ATTR_SKIP_CPU_SYNC)
+			continue;
+
 		dma_sync_single_for_device(dev, sg->dma_address, sg->length,
 					   dir);
 	}
 	return nents;
 }
 
-struct dma_map_ops m68k_dma_ops = {
+const struct dma_map_ops m68k_dma_ops = {
 	.alloc			= m68k_dma_alloc,
 	.free			= m68k_dma_free,
 	.map_page		= m68k_dma_map_page,
@@ -161,3 +166,12 @@ struct dma_map_ops m68k_dma_ops = {
 	.sync_sg_for_device	= m68k_dma_sync_sg_for_device,
 };
 EXPORT_SYMBOL(m68k_dma_ops);
+
+void arch_setup_pdev_archdata(struct platform_device *pdev)
+{
+	if (pdev->dev.coherent_dma_mask == DMA_MASK_NONE &&
+	    pdev->dev.dma_mask == NULL) {
+		pdev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
+		pdev->dev.dma_mask = &pdev->dev.coherent_dma_mask;
+	}
+}

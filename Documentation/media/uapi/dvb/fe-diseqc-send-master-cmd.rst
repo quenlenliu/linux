@@ -15,7 +15,8 @@ FE_DISEQC_SEND_MASTER_CMD - Sends a DiSEqC command
 Synopsis
 ========
 
-.. cpp:function:: int ioctl( int fd, int request, struct dvb_diseqc_master_cmd *argp )
+.. c:function:: int ioctl( int fd, FE_DISEQC_SEND_MASTER_CMD, struct dvb_diseqc_master_cmd *argp )
+    :name: FE_DISEQC_SEND_MASTER_CMD
 
 
 Arguments
@@ -24,50 +25,25 @@ Arguments
 ``fd``
     File descriptor returned by :ref:`open() <frontend_f_open>`.
 
-``request``
-    FE_DISEQC_SEND_MASTER_CMD
-
 ``argp``
     pointer to struct
-    :ref:`dvb_diseqc_master_cmd <dvb-diseqc-master-cmd>`
+    :c:type:`dvb_diseqc_master_cmd`
 
 
 Description
 ===========
 
-Sends a DiSEqC command to the antenna subsystem.
-
-.. _dvb-diseqc-master-cmd:
-
-struct dvb_diseqc_master_cmd
-============================
-
-.. flat-table:: struct dvb_diseqc_master_cmd
-    :header-rows:  0
-    :stub-columns: 0
-    :widths:       1 1 2
-
-
-    -  .. row 1
-
-       -  uint8_t
-
-       -  msg[6]
-
-       -  DiSEqC message (framing, address, command, data[3])
-
-    -  .. row 2
-
-       -  uint8_t
-
-       -  msg_len
-
-       -  Length of the DiSEqC message. Valid values are 3 to 6
+Sends the DiSEqC command pointed by :c:type:`dvb_diseqc_master_cmd`
+to the antenna subsystem.
 
 Return Value
 ============
 
-On success 0 is returned, on error -1 and the ``errno`` variable is set
-appropriately. The generic error codes are described at the
+On success 0 is returned.
+
+On error -1 is returned, and the ``errno`` variable is set
+appropriately.
+
+Generic error codes are described at the
 :ref:`Generic Error Codes <gen-errors>` chapter.
 

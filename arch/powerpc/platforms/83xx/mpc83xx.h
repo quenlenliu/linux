@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __MPC83XX_H__
 #define __MPC83XX_H__
 
@@ -86,5 +87,6 @@ extern void mpc83xx_setup_pci(void);
 #endif
 
 extern int mpc83xx_declare_of_platform_devices(void);
+extern void mpc83xx_setup_arch(void);
 
 #endif				/* __MPC83XX_H__ */

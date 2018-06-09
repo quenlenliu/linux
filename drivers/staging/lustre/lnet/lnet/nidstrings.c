@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -36,8 +37,8 @@
 
 #define DEBUG_SUBSYSTEM S_LNET
 
-#include "../../include/linux/libcfs/libcfs.h"
-#include "../../include/linux/lnet/lnet.h"
+#include <linux/libcfs/libcfs.h>
+#include <uapi/linux/lnet/nidstr.h>
 
 /* max value for numeric network address */
 #define MAX_NUMERIC_VALUE 0xffffffff
@@ -165,7 +166,7 @@ parse_addrange(const struct cfs_lstr *src, struct nidrange *nidrange)
 		return 0;
 	}
 
-	LIBCFS_ALLOC(addrrange, sizeof(struct addrrange));
+	addrrange = kzalloc(sizeof(struct addrrange), GFP_NOFS);
 	if (!addrrange)
 		return -ENOMEM;
 	list_add_tail(&addrrange->ar_link, &nidrange->nr_addrranges);
@@ -193,7 +194,7 @@ add_nidrange(const struct cfs_lstr *src,
 	struct netstrfns *nf;
 	struct nidrange *nr;
 	int endlen;
-	unsigned netnum;
+	unsigned int netnum;
 
 	if (src->ls_len >= LNET_NIDSTR_SIZE)
 		return NULL;
@@ -224,7 +225,7 @@ add_nidrange(const struct cfs_lstr *src,
 		return nr;
 	}
 
-	LIBCFS_ALLOC(nr, sizeof(struct nidrange));
+	nr = kzalloc(sizeof(struct nidrange), GFP_NOFS);
 	if (!nr)
 		return NULL;
 	list_add_tail(&nr->nr_link, nidlist);
@@ -247,10 +248,8 @@ parse_nidrange(struct cfs_lstr *src, struct list_head *nidlist)
 {
 	struct cfs_lstr addrrange;
 	struct cfs_lstr net;
-	struct cfs_lstr tmp;
 	struct nidrange *nr;
 
-	tmp = *src;
 	if (!cfs_gettok(src, '@', &addrrange))
 		goto failed;
 
@@ -287,7 +286,7 @@ free_addrranges(struct list_head *list)
 
 		cfs_expr_list_free_list(&ar->ar_numaddr_ranges);
 		list_del(&ar->ar_link);
-		LIBCFS_FREE(ar, sizeof(struct addrrange));
+		kfree(ar);
 	}
 }
 
@@ -309,7 +308,7 @@ cfs_free_nidlist(struct list_head *list)
 		nr = list_entry(pos, struct nidrange, nr_link);
 		free_addrranges(&nr->nr_addrranges);
 		list_del(pos);
-		LIBCFS_FREE(nr, sizeof(struct nidrange));
+		kfree(nr);
 	}
 }
 EXPORT_SYMBOL(cfs_free_nidlist);
@@ -1156,7 +1155,7 @@ EXPORT_SYMBOL(libcfs_nid2str_r);
 static struct netstrfns *
 libcfs_str2net_internal(const char *str, __u32 *net)
 {
-	struct netstrfns *uninitialized_var(nf);
+	struct netstrfns *nf = NULL;
 	int nob;
 	unsigned int netnum;
 	int i;
@@ -1228,7 +1227,7 @@ libcfs_str2nid(const char *str)
 EXPORT_SYMBOL(libcfs_str2nid);
 
 char *
-libcfs_id2str(lnet_process_id_t id)
+libcfs_id2str(struct lnet_process_id id)
 {
 	char *str = libcfs_next_nidstring();
 

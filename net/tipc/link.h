@@ -63,7 +63,7 @@ enum {
 enum {
 	TIPC_LINK_UP_EVT       = 1,
 	TIPC_LINK_DOWN_EVT     = (1 << 1),
-	TIPC_LINK_SND_BC_ACK   = (1 << 2)
+	TIPC_LINK_SND_STATE    = (1 << 2)
 };
 
 /* Starting value for maximum packet size negotiation on unicast links
@@ -73,8 +73,8 @@ enum {
 
 bool tipc_link_create(struct net *net, char *if_name, int bearer_id,
 		      int tolerance, char net_plane, u32 mtu, int priority,
-		      int window, u32 session, u32 ownnode, u32 peer,
-		      u16 peer_caps,
+		      int window, u32 session, u32 ownnode,
+		      u32 peer, u8 *peer_id, u16 peer_caps,
 		      struct tipc_link *bc_sndlink,
 		      struct tipc_link *bc_rcvlink,
 		      struct sk_buff_head *inputq,
@@ -138,8 +138,8 @@ void tipc_link_bc_ack_rcv(struct tipc_link *l, u16 acked,
 void tipc_link_build_bc_sync_msg(struct tipc_link *l,
 				 struct sk_buff_head *xmitq);
 void tipc_link_bc_init_rcv(struct tipc_link *l, struct tipc_msg *hdr);
-void tipc_link_bc_sync_rcv(struct tipc_link *l,   struct tipc_msg *hdr,
-			   struct sk_buff_head *xmitq);
+int tipc_link_bc_sync_rcv(struct tipc_link *l,   struct tipc_msg *hdr,
+			  struct sk_buff_head *xmitq);
 int tipc_link_bc_nack_rcv(struct tipc_link *l, struct sk_buff *skb,
 			  struct sk_buff_head *xmitq);
 #endif

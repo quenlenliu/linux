@@ -30,27 +30,39 @@
 #include "xfs_bmap.h"
 #include "xfs_dir2.h"
 #include "xfs_dir2_priv.h"
+#include "xfs_ialloc.h"
+#include "xfs_errortag.h"
 #include "xfs_error.h"
 #include "xfs_trace.h"
 
 struct xfs_name xfs_name_dotdot = { (unsigned char *)"..", 2, XFS_DIR3_FT_DIR };
 
 /*
- * @mode, if set, indicates that the type field needs to be set up.
- * This uses the transformation from file mode to DT_* as defined in linux/fs.h
- * for file type specification. This will be propagated into the directory
- * structure if appropriate for the given operation and filesystem config.
+ * Convert inode mode to directory entry filetype
  */
-const unsigned char xfs_mode_to_ftype[S_IFMT >> S_SHIFT] = {
-	[0]			= XFS_DIR3_FT_UNKNOWN,
-	[S_IFREG >> S_SHIFT]    = XFS_DIR3_FT_REG_FILE,
-	[S_IFDIR >> S_SHIFT]    = XFS_DIR3_FT_DIR,
-	[S_IFCHR >> S_SHIFT]    = XFS_DIR3_FT_CHRDEV,
-	[S_IFBLK >> S_SHIFT]    = XFS_DIR3_FT_BLKDEV,
-	[S_IFIFO >> S_SHIFT]    = XFS_DIR3_FT_FIFO,
-	[S_IFSOCK >> S_SHIFT]   = XFS_DIR3_FT_SOCK,
-	[S_IFLNK >> S_SHIFT]    = XFS_DIR3_FT_SYMLINK,
-};
+unsigned char
+xfs_mode_to_ftype(
+	int		mode)
+{
+	switch (mode & S_IFMT) {
+	case S_IFREG:
+		return XFS_DIR3_FT_REG_FILE;
+	case S_IFDIR:
+		return XFS_DIR3_FT_DIR;
+	case S_IFCHR:
+		return XFS_DIR3_FT_CHRDEV;
+	case S_IFBLK:
+		return XFS_DIR3_FT_BLKDEV;
+	case S_IFIFO:
+		return XFS_DIR3_FT_FIFO;
+	case S_IFSOCK:
+		return XFS_DIR3_FT_SOCK;
+	case S_IFLNK:
+		return XFS_DIR3_FT_SYMLINK;
+	default:
+		return XFS_DIR3_FT_UNKNOWN;
+	}
+}
 
 /*
  * ASCII case-insensitive (ie. A-Z) support for directories that was
@@ -93,7 +105,7 @@ xfs_ascii_ci_compname(
 	return result;
 }
 
-static struct xfs_nameops xfs_ascii_ci_nameops = {
+static const struct xfs_nameops xfs_ascii_ci_nameops = {
 	.hashname	= xfs_ascii_ci_hashname,
 	.compname	= xfs_ascii_ci_compname,
 };
@@ -107,8 +119,7 @@ xfs_da_mount(
 
 
 	ASSERT(mp->m_sb.sb_versionnum & XFS_SB_VERSION_DIRV2BIT);
-	ASSERT((1 << (mp->m_sb.sb_blocklog + mp->m_sb.sb_dirblklog)) <=
-	       XFS_MAX_BLOCKSIZE);
+	ASSERT(xfs_dir2_dirblock_bytes(&mp->m_sb) <= XFS_MAX_BLOCKSIZE);
 
 	mp->m_dir_inode_ops = xfs_dir_get_ops(mp, NULL);
 	mp->m_nondir_inode_ops = xfs_nondir_get_ops(mp, NULL);
@@ -128,7 +139,7 @@ xfs_da_mount(
 	dageo = mp->m_dir_geo;
 	dageo->blklog = mp->m_sb.sb_blocklog + mp->m_sb.sb_dirblklog;
 	dageo->fsblog = mp->m_sb.sb_blocklog;
-	dageo->blksize = 1 << dageo->blklog;
+	dageo->blksize = xfs_dir2_dirblock_bytes(&mp->m_sb);
 	dageo->fsbcount = 1 << mp->m_sb.sb_dirblklog;
 
 	/*
@@ -194,24 +205,9 @@ xfs_dir_ino_validate(
 	xfs_mount_t	*mp,
 	xfs_ino_t	ino)
 {
-	xfs_agblock_t	agblkno;
-	xfs_agino_t	agino;
-	xfs_agnumber_t	agno;
-	int		ino_ok;
-	int		ioff;
+	bool		ino_ok = xfs_verify_dir_ino(mp, ino);
 
-	agno = XFS_INO_TO_AGNO(mp, ino);
-	agblkno = XFS_INO_TO_AGBNO(mp, ino);
-	ioff = XFS_INO_TO_OFFSET(mp, ino);
-	agino = XFS_OFFBNO_TO_AGINO(mp, agblkno, ioff);
-	ino_ok =
-		agno < mp->m_sb.sb_agcount &&
-		agblkno < mp->m_sb.sb_agblocks &&
-		agblkno != 0 &&
-		ioff < (1 << mp->m_sb.sb_inopblog) &&
-		XFS_AGINO_TO_INO(mp, agno, agino) == ino;
-	if (unlikely(XFS_TEST_ERROR(!ino_ok, mp, XFS_ERRTAG_DIR_INO_VALIDATE,
-			XFS_RANDOM_DIR_INO_VALIDATE))) {
+	if (unlikely(XFS_TEST_ERROR(!ino_ok, mp, XFS_ERRTAG_DIR_INO_VALIDATE))) {
 		xfs_warn(mp, "Invalid inode number 0x%Lx",
 				(unsigned long long) ino);
 		XFS_ERROR_REPORT("xfs_dir_ino_validate", XFS_ERRLEVEL_LOW, mp);
@@ -631,7 +627,8 @@ xfs_dir2_isblock(
 	if ((rval = xfs_bmap_last_offset(args->dp, &last, XFS_DATA_FORK)))
 		return rval;
 	rval = XFS_FSB_TO_B(args->dp->i_mount, last) == args->geo->blksize;
-	ASSERT(rval == 0 || args->dp->i_d.di_size == args->geo->blksize);
+	if (rval != 0 && args->dp->i_d.di_size != args->geo->blksize)
+		return -EFSCORRUPTED;
 	*vp = rval;
 	return 0;
 }

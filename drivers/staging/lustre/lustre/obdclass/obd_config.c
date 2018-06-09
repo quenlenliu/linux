@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -35,11 +36,15 @@
  */
 
 #define DEBUG_SUBSYSTEM S_CLASS
-#include "../include/obd_class.h"
+
 #include <linux/string.h>
-#include "../include/lustre_log.h"
-#include "../include/lprocfs_status.h"
-#include "../include/lustre_param.h"
+
+#include <uapi/linux/lustre/lustre_ioctl.h>
+#include <llog_swab.h>
+#include <lprocfs_status.h>
+#include <lustre_log.h>
+#include <uapi/linux/lustre/lustre_param.h>
+#include <obd_class.h>
 
 #include "llog_internal.h"
 
@@ -166,6 +171,40 @@ int class_parse_nid_quiet(char *buf, lnet_nid_t *nid, char **endh)
 }
 EXPORT_SYMBOL(class_parse_nid_quiet);
 
+char *lustre_cfg_string(struct lustre_cfg *lcfg, u32 index)
+{
+	char *s;
+
+	if (!lcfg->lcfg_buflens[index])
+		return NULL;
+
+	s = lustre_cfg_buf(lcfg, index);
+	if (!s)
+		return NULL;
+
+	/*
+	 * make sure it's NULL terminated, even if this kills a char
+	 * of data.  Try to use the padding first though.
+	 */
+	if (s[lcfg->lcfg_buflens[index] - 1] != '\0') {
+		size_t last = ALIGN(lcfg->lcfg_buflens[index], 8) - 1;
+		char lost;
+
+		/* Use the smaller value */
+		if (last > lcfg->lcfg_buflens[index])
+			last = lcfg->lcfg_buflens[index];
+
+		lost = s[last];
+		s[last] = '\0';
+		if (lost != '\0') {
+			CWARN("Truncated buf %d to '%s' (lost '%c'...)\n",
+			      index, s, lost);
+		}
+	}
+	return s;
+}
+EXPORT_SYMBOL(lustre_cfg_string);
+
 /********************** class fns **********************/
 
 /**
@@ -197,7 +236,7 @@ static int class_attach(struct lustre_cfg *lcfg)
 	uuid = lustre_cfg_string(lcfg, 2);
 
 	CDEBUG(D_IOCTL, "attach type %s name: %s uuid: %s\n",
-	       MKSTR(typename), MKSTR(name), MKSTR(uuid));
+	       typename, name, uuid);
 
 	obd = class_newdev(typename, name);
 	if (IS_ERR(obd)) {
@@ -237,7 +276,7 @@ static int class_attach(struct lustre_cfg *lcfg)
 	/* recovery data */
 	init_waitqueue_head(&obd->obd_evict_inprogress_waitq);
 
-	llog_group_init(&obd->obd_olg, FID_SEQ_LLOG);
+	llog_group_init(&obd->obd_olg);
 
 	obd->obd_conn_inprogress = 0;
 
@@ -249,15 +288,6 @@ static int class_attach(struct lustre_cfg *lcfg)
 		goto out;
 	}
 	memcpy(obd->obd_uuid.uuid, uuid, len);
-
-	/* do the attach */
-	if (OBP(obd, attach)) {
-		rc = OBP(obd, attach)(obd, sizeof(*lcfg), lcfg);
-		if (rc) {
-			rc = -EINVAL;
-			goto out;
-		}
-	}
 
 	/* Detach drops this */
 	spin_lock(&obd->obd_dev_lock);
@@ -422,16 +452,11 @@ static int class_cleanup(struct obd_device *obd, struct lustre_cfg *lcfg)
 	}
 	/* Leave this on forever */
 	obd->obd_stopping = 1;
-
-	/* wait for already-arrived-connections to finish. */
-	while (obd->obd_conn_inprogress > 0) {
-		spin_unlock(&obd->obd_dev_lock);
-
-		cond_resched();
-
-		spin_lock(&obd->obd_dev_lock);
-	}
 	spin_unlock(&obd->obd_dev_lock);
+
+	while (obd->obd_conn_inprogress > 0)
+		cond_resched();
+	smp_rmb();
 
 	if (lcfg->lcfg_bufcount >= 2 && LUSTRE_CFG_BUFLEN(lcfg, 1) > 0) {
 		for (flag = lustre_cfg_string(lcfg, 1); *flag != 0; flag++)
@@ -459,7 +484,7 @@ static int class_cleanup(struct obd_device *obd, struct lustre_cfg *lcfg)
 	LASSERT(obd->obd_self_export);
 
 	/* Precleanup, we must make sure all exports get destroyed. */
-	err = obd_precleanup(obd, OBD_CLEANUP_EXPORTS);
+	err = obd_precleanup(obd);
 	if (err)
 		CERROR("Precleanup %s returned %d\n",
 		       obd->obd_name, err);
@@ -525,11 +550,6 @@ void class_decref(struct obd_device *obd, const char *scope, const void *source)
 			if (err)
 				CERROR("Cleanup %s returned %d\n",
 				       obd->obd_name, err);
-		}
-		if (OBP(obd, detach)) {
-			err = OBP(obd, detach)(obd);
-			if (err)
-				CERROR("Detach returned %d\n", err);
 		}
 		class_release_dev(obd);
 	}
@@ -603,16 +623,21 @@ static int class_del_conn(struct obd_device *obd, struct lustre_cfg *lcfg)
 }
 
 static LIST_HEAD(lustre_profile_list);
+static DEFINE_SPINLOCK(lustre_profile_list_lock);
 
 struct lustre_profile *class_get_profile(const char *prof)
 {
 	struct lustre_profile *lprof;
 
+	spin_lock(&lustre_profile_list_lock);
 	list_for_each_entry(lprof, &lustre_profile_list, lp_list) {
 		if (!strcmp(lprof->lp_profile, prof)) {
+			lprof->lp_refs++;
+			spin_unlock(&lustre_profile_list_lock);
 			return lprof;
 		}
 	}
+	spin_unlock(&lustre_profile_list_lock);
 	return NULL;
 }
 EXPORT_SYMBOL(class_get_profile);
@@ -657,7 +682,11 @@ static int class_add_profile(int proflen, char *prof, int osclen, char *osc,
 		}
 	}
 
+	spin_lock(&lustre_profile_list_lock);
+	lprof->lp_refs = 1;
+	lprof->lp_list_deleted = false;
 	list_add(&lprof->lp_list, &lustre_profile_list);
+	spin_unlock(&lustre_profile_list_lock);
 	return err;
 
 free_lp_dt:
@@ -677,27 +706,59 @@ void class_del_profile(const char *prof)
 
 	lprof = class_get_profile(prof);
 	if (lprof) {
+		spin_lock(&lustre_profile_list_lock);
+		/* because get profile increments the ref counter */
+		lprof->lp_refs--;
 		list_del(&lprof->lp_list);
-		kfree(lprof->lp_profile);
-		kfree(lprof->lp_dt);
-		kfree(lprof->lp_md);
-		kfree(lprof);
+		lprof->lp_list_deleted = true;
+		spin_unlock(&lustre_profile_list_lock);
+
+		class_put_profile(lprof);
 	}
 }
 EXPORT_SYMBOL(class_del_profile);
+
+void class_put_profile(struct lustre_profile *lprof)
+{
+	spin_lock(&lustre_profile_list_lock);
+	if (--lprof->lp_refs > 0) {
+		LASSERT(lprof->lp_refs > 0);
+		spin_unlock(&lustre_profile_list_lock);
+		return;
+	}
+	spin_unlock(&lustre_profile_list_lock);
+
+	/* confirm not a negative number */
+	LASSERT(!lprof->lp_refs);
+
+	/*
+	 * At least one class_del_profile/profiles must be called
+	 * on the target profile or lustre_profile_list will corrupt
+	 */
+	LASSERT(lprof->lp_list_deleted);
+	kfree(lprof->lp_profile);
+	kfree(lprof->lp_dt);
+	kfree(lprof->lp_md);
+	kfree(lprof);
+}
+EXPORT_SYMBOL(class_put_profile);
 
 /* COMPAT_146 */
 void class_del_profiles(void)
 {
 	struct lustre_profile *lprof, *n;
 
+	spin_lock(&lustre_profile_list_lock);
 	list_for_each_entry_safe(lprof, n, &lustre_profile_list, lp_list) {
 		list_del(&lprof->lp_list);
-		kfree(lprof->lp_profile);
-		kfree(lprof->lp_dt);
-		kfree(lprof->lp_md);
-		kfree(lprof);
+		lprof->lp_list_deleted = true;
+		spin_unlock(&lustre_profile_list_lock);
+
+		class_put_profile(lprof);
+
+		spin_lock(&lustre_profile_list_lock);
 	}
+	spin_unlock(&lustre_profile_list_lock);
 }
 EXPORT_SYMBOL(class_del_profiles);
 
@@ -756,7 +817,7 @@ static int process_param2_config(struct lustre_cfg *lcfg)
 	}
 
 	start = ktime_get();
-	rc = call_usermodehelper(argv[0], argv, NULL, 1);
+	rc = call_usermodehelper(argv[0], argv, NULL, UMH_WAIT_PROC);
 	end = ktime_get();
 
 	if (rc < 0) {
@@ -1026,7 +1087,8 @@ int class_process_proc_param(char *prefix, struct lprocfs_vars *lvars,
 
 					oldfs = get_fs();
 					set_fs(KERNEL_DS);
-					rc = (var->fops->write)(&fakefile, sval,
+					rc = var->fops->write(&fakefile,
+						(const char __user *)sval,
 								vallen, NULL);
 					set_fs(oldfs);
 				}
@@ -1060,8 +1122,6 @@ int class_process_proc_param(char *prefix, struct lprocfs_vars *lvars,
 }
 EXPORT_SYMBOL(class_process_proc_param);
 
-extern int lustre_check_exclusion(struct super_block *sb, char *svname);
-
 /** Parse a configuration llog, doing various manipulations on them
  * for various reasons, (modifications for compatibility, skip obsolete
  * records, change uuids, etc), then class_process_config() resulting
@@ -1082,7 +1142,8 @@ int class_config_llog_handler(const struct lu_env *env,
 		struct lustre_cfg_bufs bufs;
 		char *inst_name = NULL;
 		int inst_len = 0;
-		int inst = 0, swab = 0;
+		size_t lcfg_len;
+		int swab = 0;
 
 		lcfg = (struct lustre_cfg *)cfg_buf;
 		if (lcfg->lcfg_version == __swab32(LUSTRE_CFG_VERSION)) {
@@ -1173,7 +1234,6 @@ int class_config_llog_handler(const struct lu_env *env,
 
 		if (clli && clli->cfg_instance &&
 		    LUSTRE_CFG_BUFLEN(lcfg, 0) > 0) {
-			inst = 1;
 			inst_len = LUSTRE_CFG_BUFLEN(lcfg, 0) +
 				   sizeof(clli->cfg_instance) * 2 + 4;
 			inst_name = kasprintf(GFP_NOFS, "%s-%p",
@@ -1213,8 +1273,14 @@ int class_config_llog_handler(const struct lu_env *env,
 						   clli->cfg_obdname);
 		}
 
-		lcfg_new = lustre_cfg_new(lcfg->lcfg_command, &bufs);
+		lcfg_len = lustre_cfg_len(bufs.lcfg_bufcount, bufs.lcfg_buflen);
+		lcfg_new = kzalloc(lcfg_len, GFP_NOFS);
+		if (!lcfg_new) {
+			rc = -ENOMEM;
+			goto out;
+		}
 
+		lustre_cfg_init(lcfg_new, lcfg->lcfg_command, &bufs);
 		lcfg_new->lcfg_num   = lcfg->lcfg_num;
 		lcfg_new->lcfg_flags = lcfg->lcfg_flags;
 
@@ -1237,10 +1303,8 @@ int class_config_llog_handler(const struct lu_env *env,
 		lcfg_new->lcfg_nal = 0; /* illegal value for obsolete field */
 
 		rc = class_process_config(lcfg_new);
-		lustre_cfg_free(lcfg_new);
-
-		if (inst)
-			kfree(inst_name);
+		kfree(lcfg_new);
+		kfree(inst_name);
 		break;
 	}
 	default:
@@ -1317,33 +1381,33 @@ static int class_config_parse_rec(struct llog_rec_hdr *rec, char *buf,
 	if (rc < 0)
 		return rc;
 
-	ptr += snprintf(ptr, end-ptr, "cmd=%05x ", lcfg->lcfg_command);
+	ptr += snprintf(ptr, end - ptr, "cmd=%05x ", lcfg->lcfg_command);
 	if (lcfg->lcfg_flags)
-		ptr += snprintf(ptr, end-ptr, "flags=%#08x ",
+		ptr += snprintf(ptr, end - ptr, "flags=%#08x ",
 				lcfg->lcfg_flags);
 
 	if (lcfg->lcfg_num)
-		ptr += snprintf(ptr, end-ptr, "num=%#08x ", lcfg->lcfg_num);
+		ptr += snprintf(ptr, end - ptr, "num=%#08x ", lcfg->lcfg_num);
 
 	if (lcfg->lcfg_nid) {
 		char nidstr[LNET_NIDSTR_SIZE];
 
 		libcfs_nid2str_r(lcfg->lcfg_nid, nidstr, sizeof(nidstr));
-		ptr += snprintf(ptr, end-ptr, "nid=%s(%#llx)\n     ",
+		ptr += snprintf(ptr, end - ptr, "nid=%s(%#llx)\n     ",
 				nidstr, lcfg->lcfg_nid);
 	}
 
 	if (lcfg->lcfg_command == LCFG_MARKER) {
 		struct cfg_marker *marker = lustre_cfg_buf(lcfg, 1);
 
-		ptr += snprintf(ptr, end-ptr, "marker=%d(%#x)%s '%s'",
+		ptr += snprintf(ptr, end - ptr, "marker=%d(%#x)%s '%s'",
 				marker->cm_step, marker->cm_flags,
 				marker->cm_tgtname, marker->cm_comment);
 	} else {
 		int i;
 
 		for (i = 0; i <  lcfg->lcfg_bufcount; i++) {
-			ptr += snprintf(ptr, end-ptr, "%d:%s  ", i,
+			ptr += snprintf(ptr, end - ptr, "%d:%s  ", i,
 					lustre_cfg_string(lcfg, i));
 		}
 	}
@@ -1401,9 +1465,11 @@ int class_manual_cleanup(struct obd_device *obd)
 
 	lustre_cfg_bufs_reset(&bufs, obd->obd_name);
 	lustre_cfg_bufs_set_string(&bufs, 1, flags);
-	lcfg = lustre_cfg_new(LCFG_CLEANUP, &bufs);
+	lcfg = kzalloc(lustre_cfg_len(bufs.lcfg_bufcount, bufs.lcfg_buflen),
+			GFP_NOFS);
 	if (!lcfg)
 		return -ENOMEM;
+	lustre_cfg_init(lcfg, LCFG_CLEANUP, &bufs);
 
 	rc = class_process_config(lcfg);
 	if (rc) {
@@ -1417,7 +1483,7 @@ int class_manual_cleanup(struct obd_device *obd)
 	if (rc)
 		CERROR("detach failed %d: %s\n", rc, obd->obd_name);
 out:
-	lustre_cfg_free(lcfg);
+	kfree(lcfg);
 	return rc;
 }
 EXPORT_SYMBOL(class_manual_cleanup);
@@ -1426,8 +1492,8 @@ EXPORT_SYMBOL(class_manual_cleanup);
  * uuid<->export lustre hash operations
  */
 
-static unsigned
-uuid_hash(struct cfs_hash *hs, const void *key, unsigned mask)
+static unsigned int
+uuid_hash(struct cfs_hash *hs, const void *key, unsigned int mask)
 {
 	return cfs_hash_djb2_hash(((struct obd_uuid *)key)->uuid,
 				  sizeof(((struct obd_uuid *)key)->uuid), mask);

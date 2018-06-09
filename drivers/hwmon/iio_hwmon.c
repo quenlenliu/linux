@@ -23,7 +23,8 @@
  * @channels:		filled with array of channels from iio
  * @num_channels:	number of channels in channels (saves counting twice)
  * @hwmon_dev:		associated hwmon device
- * @attr_group:	the group of attributes
+ * @attr_group:		the group of attributes
+ * @groups:		null terminated array of attribute groups
  * @attrs:		null terminated array of attribute pointers.
  */
 struct iio_hwmon_state {
@@ -73,8 +74,11 @@ static int iio_hwmon_probe(struct platform_device *pdev)
 		name = dev->of_node->name;
 
 	channels = iio_channel_get_all(dev);
-	if (IS_ERR(channels))
+	if (IS_ERR(channels)) {
+		if (PTR_ERR(channels) == -ENODEV)
+			return -EPROBE_DEFER;
 		return PTR_ERR(channels);
+	}
 
 	st = devm_kzalloc(dev, sizeof(*st), GFP_KERNEL);
 	if (st == NULL) {

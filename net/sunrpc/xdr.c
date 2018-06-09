@@ -767,7 +767,7 @@ static void xdr_set_next_page(struct xdr_stream *xdr)
 	newbase -= xdr->buf->page_base;
 
 	if (xdr_set_page_base(xdr, newbase, PAGE_SIZE) < 0)
-		xdr_set_iov(xdr, xdr->buf->tail, xdr->buf->len);
+		xdr_set_iov(xdr, xdr->buf->tail, xdr->nwords << 2);
 }
 
 static bool xdr_set_next_buffer(struct xdr_stream *xdr)
@@ -776,7 +776,7 @@ static bool xdr_set_next_buffer(struct xdr_stream *xdr)
 		xdr_set_next_page(xdr);
 	else if (xdr->iov == xdr->buf->head) {
 		if (xdr_set_page_base(xdr, 0, PAGE_SIZE) < 0)
-			xdr_set_iov(xdr, xdr->buf->tail, xdr->buf->len);
+			xdr_set_iov(xdr, xdr->buf->tail, xdr->nwords << 2);
 	}
 	return xdr->p != xdr->end;
 }
@@ -807,7 +807,7 @@ void xdr_init_decode(struct xdr_stream *xdr, struct xdr_buf *buf, __be32 *p)
 EXPORT_SYMBOL_GPL(xdr_init_decode);
 
 /**
- * xdr_init_decode - Initialize an xdr_stream for decoding data.
+ * xdr_init_decode_pages - Initialize an xdr_stream for decoding into pages
  * @xdr: pointer to xdr_stream struct
  * @buf: pointer to XDR buffer from which to decode data
  * @pages: list of pages to decode into
@@ -859,12 +859,15 @@ EXPORT_SYMBOL_GPL(xdr_set_scratch_buffer);
 static __be32 *xdr_copy_to_scratch(struct xdr_stream *xdr, size_t nbytes)
 {
 	__be32 *p;
-	void *cpdest = xdr->scratch.iov_base;
+	char *cpdest = xdr->scratch.iov_base;
 	size_t cplen = (char *)xdr->end - (char *)xdr->p;
 
 	if (nbytes > xdr->scratch.iov_len)
 		return NULL;
-	memcpy(cpdest, xdr->p, cplen);
+	p = __xdr_inline_decode(xdr, cplen);
+	if (p == NULL)
+		return NULL;
+	memcpy(cpdest, p, cplen);
 	cpdest += cplen;
 	nbytes -= cplen;
 	if (!xdr_set_next_buffer(xdr))
@@ -1515,3 +1518,119 @@ out:
 }
 EXPORT_SYMBOL_GPL(xdr_process_buf);
 
+/**
+ * xdr_stream_decode_opaque - Decode variable length opaque
+ * @xdr: pointer to xdr_stream
+ * @ptr: location to store opaque data
+ * @size: size of storage buffer @ptr
+ *
+ * Return values:
+ *   On success, returns size of object stored in *@ptr
+ *   %-EBADMSG on XDR buffer overflow
+ *   %-EMSGSIZE on overflow of storage buffer @ptr
+ */
+ssize_t xdr_stream_decode_opaque(struct xdr_stream *xdr, void *ptr, size_t size)
+{
+	ssize_t ret;
+	void *p;
+
+	ret = xdr_stream_decode_opaque_inline(xdr, &p, size);
+	if (ret <= 0)
+		return ret;
+	memcpy(ptr, p, ret);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(xdr_stream_decode_opaque);
+
+/**
+ * xdr_stream_decode_opaque_dup - Decode and duplicate variable length opaque
+ * @xdr: pointer to xdr_stream
+ * @ptr: location to store pointer to opaque data
+ * @maxlen: maximum acceptable object size
+ * @gfp_flags: GFP mask to use
+ *
+ * Return values:
+ *   On success, returns size of object stored in *@ptr
+ *   %-EBADMSG on XDR buffer overflow
+ *   %-EMSGSIZE if the size of the object would exceed @maxlen
+ *   %-ENOMEM on memory allocation failure
+ */
+ssize_t xdr_stream_decode_opaque_dup(struct xdr_stream *xdr, void **ptr,
+		size_t maxlen, gfp_t gfp_flags)
+{
+	ssize_t ret;
+	void *p;
+
+	ret = xdr_stream_decode_opaque_inline(xdr, &p, maxlen);
+	if (ret > 0) {
+		*ptr = kmemdup(p, ret, gfp_flags);
+		if (*ptr != NULL)
+			return ret;
+		ret = -ENOMEM;
+	}
+	*ptr = NULL;
+	return ret;
+}
+EXPORT_SYMBOL_GPL(xdr_stream_decode_opaque_dup);
+
+/**
+ * xdr_stream_decode_string - Decode variable length string
+ * @xdr: pointer to xdr_stream
+ * @str: location to store string
+ * @size: size of storage buffer @str
+ *
+ * Return values:
+ *   On success, returns length of NUL-terminated string stored in *@str
+ *   %-EBADMSG on XDR buffer overflow
+ *   %-EMSGSIZE on overflow of storage buffer @str
+ */
+ssize_t xdr_stream_decode_string(struct xdr_stream *xdr, char *str, size_t size)
+{
+	ssize_t ret;
+	void *p;
+
+	ret = xdr_stream_decode_opaque_inline(xdr, &p, size);
+	if (ret > 0) {
+		memcpy(str, p, ret);
+		str[ret] = '\0';
+		return strlen(str);
+	}
+	*str = '\0';
+	return ret;
+}
+EXPORT_SYMBOL_GPL(xdr_stream_decode_string);
+
+/**
+ * xdr_stream_decode_string_dup - Decode and duplicate variable length string
+ * @xdr: pointer to xdr_stream
+ * @str: location to store pointer to string
+ * @maxlen: maximum acceptable string length
+ * @gfp_flags: GFP mask to use
+ *
+ * Return values:
+ *   On success, returns length of NUL-terminated string stored in *@ptr
+ *   %-EBADMSG on XDR buffer overflow
+ *   %-EMSGSIZE if the size of the string would exceed @maxlen
+ *   %-ENOMEM on memory allocation failure
+ */
+ssize_t xdr_stream_decode_string_dup(struct xdr_stream *xdr, char **str,
+		size_t maxlen, gfp_t gfp_flags)
+{
+	void *p;
+	ssize_t ret;
+
+	ret = xdr_stream_decode_opaque_inline(xdr, &p, maxlen);
+	if (ret > 0) {
+		char *s = kmalloc(ret + 1, gfp_flags);
+		if (s != NULL) {
+			memcpy(s, p, ret);
+			s[ret] = '\0';
+			*str = s;
+			return strlen(s);
+		}
+		ret = -ENOMEM;
+	}
+	*str = NULL;
+	return ret;
+}
+EXPORT_SYMBOL_GPL(xdr_stream_decode_string_dup);

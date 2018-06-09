@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -36,17 +37,19 @@
 
 #define DEBUG_SUBSYSTEM S_SEC
 
-#include "../../include/linux/libcfs/libcfs.h"
+#include <linux/libcfs/libcfs.h>
 #include <linux/crypto.h>
+#include <linux/cred.h>
 #include <linux/key.h>
+#include <linux/sched/task.h>
 
-#include "../include/obd.h"
-#include "../include/obd_class.h"
-#include "../include/obd_support.h"
-#include "../include/lustre_net.h"
-#include "../include/lustre_import.h"
-#include "../include/lustre_dlm.h"
-#include "../include/lustre_sec.h"
+#include <obd.h>
+#include <obd_class.h>
+#include <obd_support.h>
+#include <lustre_net.h>
+#include <lustre_import.h>
+#include <lustre_dlm.h>
+#include <lustre_sec.h>
 
 #include "ptlrpc_internal.h"
 
@@ -311,6 +314,19 @@ static int import_sec_check_expire(struct obd_import *imp)
 	return sptlrpc_import_sec_adapt(imp, NULL, NULL);
 }
 
+/**
+ * Get and validate the client side ptlrpc security facilities from
+ * \a imp. There is a race condition on client reconnect when the import is
+ * being destroyed while there are outstanding client bound requests. In
+ * this case do not output any error messages if import secuity is not
+ * found.
+ *
+ * \param[in] imp obd import associated with client
+ * \param[out] sec client side ptlrpc security
+ *
+ * \retval 0 if security retrieved successfully
+ * \retval -ve errno if there was a problem
+ */
 static int import_sec_validate_get(struct obd_import *imp,
 				   struct ptlrpc_sec **sec)
 {
@@ -364,7 +380,7 @@ int sptlrpc_req_get_ctx(struct ptlrpc_request *req)
 
 	if (!req->rq_cli_ctx) {
 		CERROR("req %p: fail to get context\n", req);
-		return -ENOMEM;
+		return -ECONNREFUSED;
 	}
 
 	return 0;
@@ -424,7 +440,7 @@ int sptlrpc_req_ctx_switch(struct ptlrpc_request *req,
 	/* save request message */
 	reqmsg_size = req->rq_reqlen;
 	if (reqmsg_size != 0) {
-		reqmsg = libcfs_kvzalloc(reqmsg_size, GFP_NOFS);
+		reqmsg = kvzalloc(reqmsg_size, GFP_NOFS);
 		if (!reqmsg)
 			return -ENOMEM;
 		memcpy(reqmsg, req->rq_reqmsg, reqmsg_size);
@@ -499,7 +515,14 @@ static int sptlrpc_req_replace_dead_ctx(struct ptlrpc_request *req)
 		       newctx, newctx->cc_flags);
 
 		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(HZ);
+		schedule_timeout(msecs_to_jiffies(MSEC_PER_SEC));
+	} else if (unlikely(!test_bit(PTLRPC_CTX_UPTODATE_BIT, &newctx->cc_flags))) {
+		/*
+		 * new ctx not up to date yet
+		 */
+		CDEBUG(D_SEC,
+		       "ctx (%p, fl %lx) doesn't switch, not up to date yet\n",
+		       newctx, newctx->cc_flags);
 	} else {
 		/*
 		 * it's possible newctx == oldctx if we're switching
@@ -529,9 +552,8 @@ int ctx_check_refresh(struct ptlrpc_cli_ctx *ctx)
 }
 
 static
-int ctx_refresh_timeout(void *data)
+int ctx_refresh_timeout(struct ptlrpc_request *req)
 {
-	struct ptlrpc_request *req = data;
 	int rc;
 
 	/* conn_cnt is needed in expire_one_request */
@@ -550,10 +572,8 @@ int ctx_refresh_timeout(void *data)
 }
 
 static
-void ctx_refresh_interrupt(void *data)
+void ctx_refresh_interrupt(struct ptlrpc_request *req)
 {
-	struct ptlrpc_request *req = data;
-
 	spin_lock(&req->rq_lock);
 	req->rq_intr = 1;
 	spin_unlock(&req->rq_lock);
@@ -586,7 +606,6 @@ int sptlrpc_req_refresh_ctx(struct ptlrpc_request *req, long timeout)
 {
 	struct ptlrpc_cli_ctx *ctx = req->rq_cli_ctx;
 	struct ptlrpc_sec *sec;
-	struct l_wait_info lwi;
 	int rc;
 
 	LASSERT(ctx);
@@ -718,9 +737,28 @@ again:
 	req->rq_restart = 0;
 	spin_unlock(&req->rq_lock);
 
-	lwi = LWI_TIMEOUT_INTR(timeout * HZ, ctx_refresh_timeout,
-			       ctx_refresh_interrupt, req);
-	rc = l_wait_event(req->rq_reply_waitq, ctx_check_refresh(ctx), &lwi);
+	rc = wait_event_idle_timeout(req->rq_reply_waitq,
+				     ctx_check_refresh(ctx),
+				     timeout * HZ);
+	if (rc == 0 && ctx_refresh_timeout(req) == 0) {
+		/* Keep waiting, but enable some signals */
+		rc = l_wait_event_abortable(req->rq_reply_waitq,
+					    ctx_check_refresh(ctx));
+		if (rc == 0)
+			rc = 1;
+	}
+
+	if (rc > 0)
+		/* condition is true */
+		rc = 0;
+	else if (rc == 0)
+		/* Timed out */
+		rc = -ETIMEDOUT;
+	else {
+		/* Aborted by signal */
+		rc = -EINTR;
+		ctx_refresh_interrupt(req);
+	}
 
 	/*
 	 * following cases could lead us here:
@@ -822,7 +860,7 @@ void sptlrpc_request_out_callback(struct ptlrpc_request *req)
 	if (req->rq_pool || !req->rq_reqbuf)
 		return;
 
-	kfree(req->rq_reqbuf);
+	kvfree(req->rq_reqbuf);
 	req->rq_reqbuf = NULL;
 	req->rq_reqbuf_len = 0;
 }
@@ -1049,7 +1087,7 @@ int sptlrpc_cli_unwrap_early_reply(struct ptlrpc_request *req,
 
 	early_size = req->rq_nob_received;
 	early_bufsz = size_roundup_power2(early_size);
-	early_buf = libcfs_kvzalloc(early_bufsz, GFP_NOFS);
+	early_buf = kvzalloc(early_bufsz, GFP_NOFS);
 	if (!early_buf) {
 		rc = -ENOMEM;
 		goto err_req;
@@ -2204,7 +2242,7 @@ int sptlrpc_pack_user_desc(struct lustre_msg *msg, int offset)
 	task_lock(current);
 	if (pud->pud_ngroups > current_ngroups)
 		pud->pud_ngroups = current_ngroups;
-	memcpy(pud->pud_groups, current_cred()->group_info->blocks[0],
+	memcpy(pud->pud_groups, current_cred()->group_info->gid,
 	       pud->pud_ngroups * sizeof(__u32));
 	task_unlock(current);
 

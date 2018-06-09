@@ -197,7 +197,7 @@ static irqreturn_t nau7802_eoc_trigger(int irq, void *private)
 	if (st->conversion_count < NAU7802_MIN_CONVERSIONS)
 		st->conversion_count++;
 	if (st->conversion_count >= NAU7802_MIN_CONVERSIONS)
-		complete_all(&st->value_ok);
+		complete(&st->value_ok);
 
 	return IRQ_HANDLED;
 }
@@ -402,7 +402,6 @@ static int nau7802_write_raw_get_fmt(struct iio_dev *indio_dev,
 }
 
 static const struct iio_info nau7802_info = {
-	.driver_module = THIS_MODULE,
 	.read_raw = &nau7802_read_raw,
 	.write_raw = &nau7802_write_raw,
 	.write_raw_get_fmt = nau7802_write_raw_get_fmt,

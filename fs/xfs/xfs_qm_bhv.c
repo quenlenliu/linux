@@ -33,7 +33,7 @@ xfs_fill_statvfs_from_dquot(
 	struct kstatfs		*statp,
 	struct xfs_dquot	*dqp)
 {
-	__uint64_t		limit;
+	uint64_t		limit;
 
 	limit = dqp->q_core.d_blk_softlimit ?
 		be64_to_cpu(dqp->q_core.d_blk_softlimit) :
@@ -72,7 +72,7 @@ xfs_qm_statvfs(
 	xfs_mount_t		*mp = ip->i_mount;
 	xfs_dquot_t		*dqp;
 
-	if (!xfs_qm_dqget(mp, NULL, xfs_get_projid(ip), XFS_DQ_PROJ, 0, &dqp)) {
+	if (!xfs_qm_dqget(mp, xfs_get_projid(ip), XFS_DQ_PROJ, false, &dqp)) {
 		xfs_fill_statvfs_from_dquot(statp, dqp);
 		xfs_qm_dqput(dqp);
 	}

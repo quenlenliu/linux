@@ -9,18 +9,16 @@
  *   published by the Free Software Foundation.
  */
 
-/* MichelMIC routine define */
-struct michel_mic_t {
-	uint32_t K0;	// Key 
-	uint32_t K1;	// Key 
-	uint32_t L;	// Current state 
-	uint32_t R;	// Current state 
-	uint8_t M[4];	// Message accumulator (single word) 
-	int nBytesInM;	// # bytes in M 
-	uint8_t Result[8];
+/* MichaelMIC routine define */
+struct michael_mic_t {
+	u32 k0;	// Key
+	u32 k1;	// Key
+	u32 l;	// Current state
+	u32 r;	// Current state
+	u8 m[4];	// Message accumulator (single word)
+	int m_bytes;	// # bytes in M
+	u8 result[8];
 };
 
-extern
-void MichaelMICFunction(struct michel_mic_t *Mic, uint8_t * Key,
-			uint8_t * Data, int Len, uint8_t priority,
-			uint8_t * Result);
+void michael_mic_function(struct michael_mic_t *mic, u8 *key,
+			  u8 *data, int len, u8 priority, u8 *result);

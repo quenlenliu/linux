@@ -22,6 +22,7 @@ static const char * const sunxi_board_dt_compat[] = {
 	"allwinner,sun5i-a10s",
 	"allwinner,sun5i-a13",
 	"allwinner,sun5i-r8",
+	"nextthing,gr8",
 	NULL,
 };
 
@@ -41,7 +42,7 @@ static void __init sun6i_timer_init(void)
 	of_clk_init(NULL);
 	if (IS_ENABLED(CONFIG_RESET_CONTROLLER))
 		sun6i_reset_init();
-	clocksource_probe();
+	timer_probe();
 }
 
 DT_MACHINE_START(SUN6I_DT, "Allwinner sun6i (A31) Family")
@@ -62,7 +63,10 @@ static const char * const sun8i_board_dt_compat[] = {
 	"allwinner,sun8i-a23",
 	"allwinner,sun8i-a33",
 	"allwinner,sun8i-a83t",
+	"allwinner,sun8i-h2-plus",
 	"allwinner,sun8i-h3",
+	"allwinner,sun8i-r40",
+	"allwinner,sun8i-v3s",
 	NULL,
 };
 

@@ -1,14 +1,8 @@
-/*
- * Freescale ALSA SoC Digital Audio Interface (SAI) driver.
- *
- * Copyright 2012-2015 Freescale Semiconductor, Inc.
- *
- * This program is free software, you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation, either version 2 of the License, or(at your
- * option) any later version.
- *
- */
+// SPDX-License-Identifier: GPL-2.0+
+//
+// Freescale ALSA SoC Digital Audio Interface (SAI) driver.
+//
+// Copyright 2012-2015 Freescale Semiconductor, Inc.
 
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -668,7 +662,7 @@ static struct snd_soc_dai_driver fsl_sai_dai = {
 	.playback = {
 		.stream_name = "CPU-Playback",
 		.channels_min = 1,
-		.channels_max = 2,
+		.channels_max = 32,
 		.rate_min = 8000,
 		.rate_max = 192000,
 		.rates = SNDRV_PCM_RATE_KNOT,
@@ -677,7 +671,7 @@ static struct snd_soc_dai_driver fsl_sai_dai = {
 	.capture = {
 		.stream_name = "CPU-Capture",
 		.channels_min = 1,
-		.channels_max = 2,
+		.channels_max = 32,
 		.rate_min = 8000,
 		.rate_max = 192000,
 		.rates = SNDRV_PCM_RATE_KNOT,
@@ -801,8 +795,8 @@ static int fsl_sai_probe(struct platform_device *pdev)
 
 	sai->pdev = pdev;
 
-	if (of_device_is_compatible(pdev->dev.of_node, "fsl,imx6sx-sai") ||
-	    of_device_is_compatible(pdev->dev.of_node, "fsl,imx6ul-sai"))
+	if (of_device_is_compatible(np, "fsl,imx6sx-sai") ||
+	    of_device_is_compatible(np, "fsl,imx6ul-sai"))
 		sai->sai_on_imx = true;
 
 	sai->is_lsb_first = of_property_read_bool(np, "lsb-first");
@@ -883,7 +877,7 @@ static int fsl_sai_probe(struct platform_device *pdev)
 	}
 
 	if (of_find_property(np, "fsl,sai-mclk-direction-output", NULL) &&
-	    of_device_is_compatible(pdev->dev.of_node, "fsl,imx6ul-sai")) {
+	    of_device_is_compatible(np, "fsl,imx6ul-sai")) {
 		gpr = syscon_regmap_lookup_by_compatible("fsl,imx6ul-iomuxc-gpr");
 		if (IS_ERR(gpr)) {
 			dev_err(&pdev->dev, "cannot find iomuxc registers\n");

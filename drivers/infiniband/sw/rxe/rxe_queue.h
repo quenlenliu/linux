@@ -77,12 +77,13 @@ struct rxe_queue {
 };
 
 int do_mmap_info(struct rxe_dev *rxe,
-		 struct ib_udata *udata,
-		 bool is_req,
+		 struct mminfo __user *outbuf,
 		 struct ib_ucontext *context,
 		 struct rxe_queue_buf *buf,
 		 size_t buf_size,
 		 struct rxe_mmap_info **ip_p);
+
+void rxe_queue_reset(struct rxe_queue *q);
 
 struct rxe_queue *rxe_queue_init(struct rxe_dev *rxe,
 				 int *num_elem,
@@ -92,7 +93,7 @@ int rxe_queue_resize(struct rxe_queue *q,
 		     unsigned int *num_elem_p,
 		     unsigned int elem_size,
 		     struct ib_ucontext *context,
-		     struct ib_udata *udata,
+		     struct mminfo __user *outbuf,
 		     /* Protect producers while resizing queue */
 		     spinlock_t *producer_lock,
 		     /* Protect consumers while resizing queue */

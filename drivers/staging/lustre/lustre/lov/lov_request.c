@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -32,10 +33,10 @@
 
 #define DEBUG_SUBSYSTEM S_LOV
 
-#include "../../include/linux/libcfs/libcfs.h"
+#include <linux/libcfs/libcfs.h>
 
-#include "../include/obd_class.h"
-#include "../include/lustre/lustre_idl.h"
+#include <obd_class.h>
+#include <uapi/linux/lustre/lustre_idl.h>
 #include "lov_internal.h"
 
 static void lov_init_set(struct lov_request_set *set)
@@ -43,74 +44,30 @@ static void lov_init_set(struct lov_request_set *set)
 	set->set_count = 0;
 	atomic_set(&set->set_completes, 0);
 	atomic_set(&set->set_success, 0);
-	atomic_set(&set->set_finish_checked, 0);
-	set->set_cookies = NULL;
 	INIT_LIST_HEAD(&set->set_list);
-	atomic_set(&set->set_refcount, 1);
-	init_waitqueue_head(&set->set_waitq);
 }
 
-void lov_finish_set(struct lov_request_set *set)
+static void lov_finish_set(struct lov_request_set *set)
 {
-	struct list_head *pos, *n;
+	struct lov_request *req;
 
 	LASSERT(set);
-	list_for_each_safe(pos, n, &set->set_list) {
-		struct lov_request *req = list_entry(pos,
-							 struct lov_request,
-							 rq_link);
+	while ((req = list_first_entry_or_null(&set->set_list,
+					       struct lov_request,
+					       rq_link)) != NULL) {
 		list_del_init(&req->rq_link);
-
-		if (req->rq_oi.oi_oa)
-			kmem_cache_free(obdo_cachep, req->rq_oi.oi_oa);
 		kfree(req->rq_oi.oi_osfs);
 		kfree(req);
 	}
 	kfree(set);
 }
 
-static int lov_set_finished(struct lov_request_set *set, int idempotent)
-{
-	int completes = atomic_read(&set->set_completes);
-
-	CDEBUG(D_INFO, "check set %d/%d\n", completes, set->set_count);
-
-	if (completes == set->set_count) {
-		if (idempotent)
-			return 1;
-		if (atomic_inc_return(&set->set_finish_checked) == 1)
-			return 1;
-	}
-	return 0;
-}
-
 static void lov_update_set(struct lov_request_set *set,
 			   struct lov_request *req, int rc)
 {
-	req->rq_complete = 1;
-	req->rq_rc = rc;
-
 	atomic_inc(&set->set_completes);
 	if (rc == 0)
 		atomic_inc(&set->set_success);
-
-	wake_up(&set->set_waitq);
-}
-
-int lov_update_common_set(struct lov_request_set *set,
-			  struct lov_request *req, int rc)
-{
-	struct lov_obd *lov = &set->set_exp->exp_obd->u.lov;
-
-	lov_update_set(set, req, rc);
-
-	/* grace error on inactive ost */
-	if (rc && !(lov->lov_tgts[req->rq_idx] &&
-		    lov->lov_tgts[req->rq_idx]->ltd_active))
-		rc = 0;
-
-	/* FIXME in raid1 regime, should return 0 */
-	return rc;
 }
 
 static void lov_set_add_req(struct lov_request *req,
@@ -142,8 +99,7 @@ static int lov_check_set(struct lov_obd *lov, int idx)
  */
 static int lov_check_and_wait_active(struct lov_obd *lov, int ost_idx)
 {
-	wait_queue_head_t waitq;
-	struct l_wait_info lwi;
+	int cnt = 0;
 	struct lov_tgt_desc *tgt;
 	int rc = 0;
 
@@ -168,11 +124,10 @@ static int lov_check_and_wait_active(struct lov_obd *lov, int ost_idx)
 
 	mutex_unlock(&lov->lov_lock);
 
-	init_waitqueue_head(&waitq);
-	lwi = LWI_TIMEOUT_INTERVAL(cfs_time_seconds(obd_timeout),
-				   cfs_time_seconds(1), NULL, NULL);
-
-	rc = l_wait_event(waitq, lov_check_set(lov, ost_idx), &lwi);
+	while (cnt < obd_timeout && !lov_check_set(lov, ost_idx)) {
+		schedule_timeout_uninterruptible(HZ);
+		cnt++;
+	}
 	if (tgt->ltd_active)
 		return 1;
 
@@ -180,357 +135,6 @@ static int lov_check_and_wait_active(struct lov_obd *lov, int ost_idx)
 
 out:
 	mutex_unlock(&lov->lov_lock);
-	return rc;
-}
-
-static int common_attr_done(struct lov_request_set *set)
-{
-	struct lov_request *req;
-	struct obdo *tmp_oa;
-	int rc = 0, attrset = 0;
-
-	if (!set->set_oi->oi_oa)
-		return 0;
-
-	if (!atomic_read(&set->set_success))
-		return -EIO;
-
-	tmp_oa = kmem_cache_zalloc(obdo_cachep, GFP_NOFS);
-	if (!tmp_oa) {
-		rc = -ENOMEM;
-		goto out;
-	}
-
-	list_for_each_entry(req, &set->set_list, rq_link) {
-		if (!req->rq_complete || req->rq_rc)
-			continue;
-		if (req->rq_oi.oi_oa->o_valid == 0)   /* inactive stripe */
-			continue;
-		lov_merge_attrs(tmp_oa, req->rq_oi.oi_oa,
-				req->rq_oi.oi_oa->o_valid,
-				set->set_oi->oi_md, req->rq_stripe, &attrset);
-	}
-	if (!attrset) {
-		CERROR("No stripes had valid attrs\n");
-		rc = -EIO;
-	}
-	if ((set->set_oi->oi_oa->o_valid & OBD_MD_FLEPOCH) &&
-	    (set->set_oi->oi_md->lsm_stripe_count != attrset)) {
-		/* When we take attributes of some epoch, we require all the
-		 * ost to be active.
-		 */
-		CERROR("Not all the stripes had valid attrs\n");
-		rc = -EIO;
-		goto out;
-	}
-
-	tmp_oa->o_oi = set->set_oi->oi_oa->o_oi;
-	memcpy(set->set_oi->oi_oa, tmp_oa, sizeof(*set->set_oi->oi_oa));
-out:
-	if (tmp_oa)
-		kmem_cache_free(obdo_cachep, tmp_oa);
-	return rc;
-}
-
-int lov_fini_getattr_set(struct lov_request_set *set)
-{
-	int rc = 0;
-
-	if (!set)
-		return 0;
-	LASSERT(set->set_exp);
-	if (atomic_read(&set->set_completes))
-		rc = common_attr_done(set);
-
-	lov_put_reqset(set);
-
-	return rc;
-}
-
-/* The callback for osc_getattr_async that finalizes a request info when a
- * response is received.
- */
-static int cb_getattr_update(void *cookie, int rc)
-{
-	struct obd_info *oinfo = cookie;
-	struct lov_request *lovreq;
-
-	lovreq = container_of(oinfo, struct lov_request, rq_oi);
-	return lov_update_common_set(lovreq->rq_rqset, lovreq, rc);
-}
-
-int lov_prep_getattr_set(struct obd_export *exp, struct obd_info *oinfo,
-			 struct lov_request_set **reqset)
-{
-	struct lov_request_set *set;
-	struct lov_obd *lov = &exp->exp_obd->u.lov;
-	int rc = 0, i;
-
-	set = kzalloc(sizeof(*set), GFP_NOFS);
-	if (!set)
-		return -ENOMEM;
-	lov_init_set(set);
-
-	set->set_exp = exp;
-	set->set_oi = oinfo;
-
-	for (i = 0; i < oinfo->oi_md->lsm_stripe_count; i++) {
-		struct lov_oinfo *loi;
-		struct lov_request *req;
-
-		loi = oinfo->oi_md->lsm_oinfo[i];
-		if (lov_oinfo_is_dummy(loi))
-			continue;
-
-		if (!lov_check_and_wait_active(lov, loi->loi_ost_idx)) {
-			CDEBUG(D_HA, "lov idx %d inactive\n", loi->loi_ost_idx);
-			if (oinfo->oi_oa->o_valid & OBD_MD_FLEPOCH) {
-				/* SOM requires all the OSTs to be active. */
-				rc = -EIO;
-				goto out_set;
-			}
-			continue;
-		}
-
-		req = kzalloc(sizeof(*req), GFP_NOFS);
-		if (!req) {
-			rc = -ENOMEM;
-			goto out_set;
-		}
-
-		req->rq_stripe = i;
-		req->rq_idx = loi->loi_ost_idx;
-
-		req->rq_oi.oi_oa = kmem_cache_zalloc(obdo_cachep, GFP_NOFS);
-		if (!req->rq_oi.oi_oa) {
-			kfree(req);
-			rc = -ENOMEM;
-			goto out_set;
-		}
-		memcpy(req->rq_oi.oi_oa, oinfo->oi_oa,
-		       sizeof(*req->rq_oi.oi_oa));
-		req->rq_oi.oi_oa->o_oi = loi->loi_oi;
-		req->rq_oi.oi_cb_up = cb_getattr_update;
-
-		lov_set_add_req(req, set);
-	}
-	if (!set->set_count) {
-		rc = -EIO;
-		goto out_set;
-	}
-	*reqset = set;
-	return rc;
-out_set:
-	lov_fini_getattr_set(set);
-	return rc;
-}
-
-int lov_fini_destroy_set(struct lov_request_set *set)
-{
-	if (!set)
-		return 0;
-	LASSERT(set->set_exp);
-	if (atomic_read(&set->set_completes)) {
-		/* FIXME update qos data here */
-	}
-
-	lov_put_reqset(set);
-
-	return 0;
-}
-
-int lov_prep_destroy_set(struct obd_export *exp, struct obd_info *oinfo,
-			 struct obdo *src_oa, struct lov_stripe_md *lsm,
-			 struct obd_trans_info *oti,
-			 struct lov_request_set **reqset)
-{
-	struct lov_request_set *set;
-	struct lov_obd *lov = &exp->exp_obd->u.lov;
-	int rc = 0, i;
-
-	set = kzalloc(sizeof(*set), GFP_NOFS);
-	if (!set)
-		return -ENOMEM;
-	lov_init_set(set);
-
-	set->set_exp = exp;
-	set->set_oi = oinfo;
-	set->set_oi->oi_md = lsm;
-	set->set_oi->oi_oa = src_oa;
-	if (oti && src_oa->o_valid & OBD_MD_FLCOOKIE)
-		set->set_cookies = oti->oti_logcookies;
-
-	for (i = 0; i < lsm->lsm_stripe_count; i++) {
-		struct lov_oinfo *loi;
-		struct lov_request *req;
-
-		loi = lsm->lsm_oinfo[i];
-		if (lov_oinfo_is_dummy(loi))
-			continue;
-
-		if (!lov_check_and_wait_active(lov, loi->loi_ost_idx)) {
-			CDEBUG(D_HA, "lov idx %d inactive\n", loi->loi_ost_idx);
-			continue;
-		}
-
-		req = kzalloc(sizeof(*req), GFP_NOFS);
-		if (!req) {
-			rc = -ENOMEM;
-			goto out_set;
-		}
-
-		req->rq_stripe = i;
-		req->rq_idx = loi->loi_ost_idx;
-
-		req->rq_oi.oi_oa = kmem_cache_zalloc(obdo_cachep, GFP_NOFS);
-		if (!req->rq_oi.oi_oa) {
-			kfree(req);
-			rc = -ENOMEM;
-			goto out_set;
-		}
-		memcpy(req->rq_oi.oi_oa, src_oa, sizeof(*req->rq_oi.oi_oa));
-		req->rq_oi.oi_oa->o_oi = loi->loi_oi;
-		lov_set_add_req(req, set);
-	}
-	if (!set->set_count) {
-		rc = -EIO;
-		goto out_set;
-	}
-	*reqset = set;
-	return rc;
-out_set:
-	lov_fini_destroy_set(set);
-	return rc;
-}
-
-int lov_fini_setattr_set(struct lov_request_set *set)
-{
-	int rc = 0;
-
-	if (!set)
-		return 0;
-	LASSERT(set->set_exp);
-	if (atomic_read(&set->set_completes)) {
-		rc = common_attr_done(set);
-		/* FIXME update qos data here */
-	}
-
-	lov_put_reqset(set);
-	return rc;
-}
-
-int lov_update_setattr_set(struct lov_request_set *set,
-			   struct lov_request *req, int rc)
-{
-	struct lov_obd *lov = &req->rq_rqset->set_exp->exp_obd->u.lov;
-	struct lov_stripe_md *lsm = req->rq_rqset->set_oi->oi_md;
-
-	lov_update_set(set, req, rc);
-
-	/* grace error on inactive ost */
-	if (rc && !(lov->lov_tgts[req->rq_idx] &&
-		    lov->lov_tgts[req->rq_idx]->ltd_active))
-		rc = 0;
-
-	if (rc == 0) {
-		if (req->rq_oi.oi_oa->o_valid & OBD_MD_FLCTIME)
-			lsm->lsm_oinfo[req->rq_stripe]->loi_lvb.lvb_ctime =
-				req->rq_oi.oi_oa->o_ctime;
-		if (req->rq_oi.oi_oa->o_valid & OBD_MD_FLMTIME)
-			lsm->lsm_oinfo[req->rq_stripe]->loi_lvb.lvb_mtime =
-				req->rq_oi.oi_oa->o_mtime;
-		if (req->rq_oi.oi_oa->o_valid & OBD_MD_FLATIME)
-			lsm->lsm_oinfo[req->rq_stripe]->loi_lvb.lvb_atime =
-				req->rq_oi.oi_oa->o_atime;
-	}
-
-	return rc;
-}
-
-/* The callback for osc_setattr_async that finalizes a request info when a
- * response is received.
- */
-static int cb_setattr_update(void *cookie, int rc)
-{
-	struct obd_info *oinfo = cookie;
-	struct lov_request *lovreq;
-
-	lovreq = container_of(oinfo, struct lov_request, rq_oi);
-	return lov_update_setattr_set(lovreq->rq_rqset, lovreq, rc);
-}
-
-int lov_prep_setattr_set(struct obd_export *exp, struct obd_info *oinfo,
-			 struct obd_trans_info *oti,
-			 struct lov_request_set **reqset)
-{
-	struct lov_request_set *set;
-	struct lov_obd *lov = &exp->exp_obd->u.lov;
-	int rc = 0, i;
-
-	set = kzalloc(sizeof(*set), GFP_NOFS);
-	if (!set)
-		return -ENOMEM;
-	lov_init_set(set);
-
-	set->set_exp = exp;
-	set->set_oi = oinfo;
-	if (oti && oinfo->oi_oa->o_valid & OBD_MD_FLCOOKIE)
-		set->set_cookies = oti->oti_logcookies;
-
-	for (i = 0; i < oinfo->oi_md->lsm_stripe_count; i++) {
-		struct lov_oinfo *loi = oinfo->oi_md->lsm_oinfo[i];
-		struct lov_request *req;
-
-		if (lov_oinfo_is_dummy(loi))
-			continue;
-
-		if (!lov_check_and_wait_active(lov, loi->loi_ost_idx)) {
-			CDEBUG(D_HA, "lov idx %d inactive\n", loi->loi_ost_idx);
-			continue;
-		}
-
-		req = kzalloc(sizeof(*req), GFP_NOFS);
-		if (!req) {
-			rc = -ENOMEM;
-			goto out_set;
-		}
-		req->rq_stripe = i;
-		req->rq_idx = loi->loi_ost_idx;
-
-		req->rq_oi.oi_oa = kmem_cache_zalloc(obdo_cachep, GFP_NOFS);
-		if (!req->rq_oi.oi_oa) {
-			kfree(req);
-			rc = -ENOMEM;
-			goto out_set;
-		}
-		memcpy(req->rq_oi.oi_oa, oinfo->oi_oa,
-		       sizeof(*req->rq_oi.oi_oa));
-		req->rq_oi.oi_oa->o_oi = loi->loi_oi;
-		req->rq_oi.oi_oa->o_stripe_idx = i;
-		req->rq_oi.oi_cb_up = cb_setattr_update;
-
-		if (oinfo->oi_oa->o_valid & OBD_MD_FLSIZE) {
-			int off = lov_stripe_offset(oinfo->oi_md,
-						    oinfo->oi_oa->o_size, i,
-						    &req->rq_oi.oi_oa->o_size);
-
-			if (off < 0 && req->rq_oi.oi_oa->o_size)
-				req->rq_oi.oi_oa->o_size--;
-
-			CDEBUG(D_INODE, "stripe %d has size %llu/%llu\n",
-			       i, req->rq_oi.oi_oa->o_size,
-			       oinfo->oi_oa->o_size);
-		}
-		lov_set_add_req(req, set);
-	}
-	if (!set->set_count) {
-		rc = -EIO;
-		goto out_set;
-	}
-	*reqset = set;
-	return rc;
-out_set:
-	lov_fini_setattr_set(set);
 	return rc;
 }
 
@@ -543,8 +147,8 @@ out_set:
 			(tot) += (add);				 \
 	} while (0)
 
-int lov_fini_statfs(struct obd_device *obd, struct obd_statfs *osfs,
-		    int success)
+static int lov_fini_statfs(struct obd_device *obd, struct obd_statfs *osfs,
+			   int success)
 {
 	if (success) {
 		__u32 expected_stripes = lov_get_stripecnt(&obd->u.lov,
@@ -575,7 +179,9 @@ int lov_fini_statfs_set(struct lov_request_set *set)
 		rc = lov_fini_statfs(set->set_obd, set->set_oi->oi_osfs,
 				     atomic_read(&set->set_success));
 	}
-	lov_put_reqset(set);
+
+	lov_finish_set(set);
+
 	return rc;
 }
 
@@ -677,14 +283,7 @@ static int cb_statfs_update(void *cookie, int rc)
 out_update:
 	lov_update_statfs(osfs, lov_sfs, success);
 	obd_putref(lovobd);
-
 out:
-	if (set->set_oi->oi_flags & OBD_STATFS_PTLRPCD &&
-	    lov_set_finished(set, 0)) {
-		lov_statfs_interpret(NULL, set, set->set_count !=
-				     atomic_read(&set->set_success));
-	}
-
 	return 0;
 }
 
@@ -714,9 +313,6 @@ int lov_prep_statfs_set(struct obd_device *obd, struct obd_info *oinfo,
 			continue;
 		}
 
-		if (!lov->lov_tgts[i]->ltd_active)
-			lov_check_and_wait_active(lov, i);
-
 		/* skip targets that have been explicitly disabled by the
 		 * administrator
 		 */
@@ -724,6 +320,9 @@ int lov_prep_statfs_set(struct obd_device *obd, struct obd_info *oinfo,
 			CDEBUG(D_HA, "lov idx %d administratively disabled\n", i);
 			continue;
 		}
+
+		if (!lov->lov_tgts[i]->ltd_active)
+			lov_check_and_wait_active(lov, i);
 
 		req = kzalloc(sizeof(*req), GFP_NOFS);
 		if (!req) {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -51,15 +52,15 @@
 
 #define DEBUG_SUBSYSTEM S_RPC
 
-#include "../../include/linux/libcfs/libcfs.h"
+#include <linux/libcfs/libcfs.h>
 
-#include "../include/lustre_net.h"
-#include "../include/lustre_lib.h"
-#include "../include/lustre_ha.h"
-#include "../include/obd_class.h"	/* for obd_zombie */
-#include "../include/obd_support.h"	/* for OBD_FAIL_CHECK */
-#include "../include/cl_object.h"	/* cl_env_{get,put}() */
-#include "../include/lprocfs_status.h"
+#include <lustre_net.h>
+#include <lustre_lib.h>
+#include <lustre_ha.h>
+#include <obd_class.h>		/* for obd_zombie */
+#include <obd_support.h>	/* for OBD_FAIL_CHECK */
+#include <cl_object.h>		/* cl_env_{get,put}() */
+#include <lprocfs_status.h>
 
 #include "ptlrpc_internal.h"
 
@@ -82,7 +83,8 @@ struct ptlrpcd {
  */
 static int max_ptlrpcds;
 module_param(max_ptlrpcds, int, 0644);
-MODULE_PARM_DESC(max_ptlrpcds, "Max ptlrpcd thread count to be started.");
+MODULE_PARM_DESC(max_ptlrpcds,
+		 "Max ptlrpcd thread count to be started (obsolete).");
 
 /*
  * ptlrpcd_bind_policy is obsolete, but retained to ensure that
@@ -102,7 +104,7 @@ MODULE_PARM_DESC(ptlrpcd_bind_policy,
 static int ptlrpcd_per_cpt_max;
 module_param(ptlrpcd_per_cpt_max, int, 0644);
 MODULE_PARM_DESC(ptlrpcd_per_cpt_max,
-		 "Max ptlrpcd thread count to be started per cpt.");
+		 "Max ptlrpcd thread count to be started per CPT.");
 
 /*
  * ptlrpcd_partner_group_size: The desired number of threads in each
@@ -195,17 +197,14 @@ ptlrpcd_select_pc(struct ptlrpc_request *req)
 static int ptlrpcd_steal_rqset(struct ptlrpc_request_set *des,
 			       struct ptlrpc_request_set *src)
 {
-	struct list_head *tmp, *pos;
-	struct ptlrpc_request *req;
+	struct ptlrpc_request *req, *tmp;
 	int rc = 0;
 
 	spin_lock(&src->set_new_req_lock);
 	if (likely(!list_empty(&src->set_new_requests))) {
-		list_for_each_safe(pos, tmp, &src->set_new_requests) {
-			req = list_entry(pos, struct ptlrpc_request,
-					 rq_set_chain);
+		list_for_each_entry_safe(req, tmp, &src->set_new_requests, rq_set_chain)
 			req->rq_set = des;
-		}
+
 		list_splice_init(&src->set_new_requests, &des->set_requests);
 		rc = atomic_read(&src->set_new_count);
 		atomic_add(rc, &des->set_remaining);
@@ -228,12 +227,13 @@ void ptlrpcd_add_req(struct ptlrpc_request *req)
 
 	spin_lock(&req->rq_lock);
 	if (req->rq_invalid_rqset) {
-		struct l_wait_info lwi = LWI_TIMEOUT(cfs_time_seconds(5),
-						     back_to_sleep, NULL);
-
 		req->rq_invalid_rqset = 0;
 		spin_unlock(&req->rq_lock);
-		l_wait_event(req->rq_set_waitq, !req->rq_set, &lwi);
+		if (wait_event_idle_timeout(req->rq_set_waitq,
+					    !req->rq_set,
+					    5 * HZ) == 0)
+			wait_event_idle(req->rq_set_waitq,
+					!req->rq_set);
 	} else if (req->rq_set) {
 		/* If we have a valid "rq_set", just reuse it to avoid double
 		 * linked.
@@ -270,8 +270,7 @@ static inline void ptlrpc_reqset_get(struct ptlrpc_request_set *set)
  */
 static int ptlrpcd_check(struct lu_env *env, struct ptlrpcd_ctl *pc)
 {
-	struct list_head *tmp, *pos;
-	struct ptlrpc_request *req;
+	struct ptlrpc_request *req, *tmp;
 	struct ptlrpc_request_set *set = pc->pc_set;
 	int rc = 0;
 	int rc2;
@@ -317,8 +316,7 @@ static int ptlrpcd_check(struct lu_env *env, struct ptlrpcd_ctl *pc)
 	/* NB: ptlrpc_check_set has already moved completed request at the
 	 * head of seq::set_requests
 	 */
-	list_for_each_safe(pos, tmp, &set->set_requests) {
-		req = list_entry(pos, struct ptlrpc_request, rq_set_chain);
+	list_for_each_entry_safe(req, tmp, &set->set_requests, rq_set_chain) {
 		if (req->rq_phase != RQ_PHASE_COMPLETE)
 			break;
 
@@ -412,7 +410,7 @@ static int ptlrpcd(void *arg)
 	 * an argument, describing its "scope".
 	 */
 	rc = lu_context_init(&env.le_ctx,
-			     LCT_CL_THREAD|LCT_REMEMBER|LCT_NOREF);
+			     LCT_CL_THREAD | LCT_REMEMBER | LCT_NOREF);
 	if (rc == 0) {
 		rc = lu_context_init(env.le_ses,
 				     LCT_SESSION | LCT_REMEMBER | LCT_NOREF);
@@ -432,16 +430,17 @@ static int ptlrpcd(void *arg)
 	 * new_req_list and ptlrpcd_check() moves them into the set.
 	 */
 	do {
-		struct l_wait_info lwi;
 		int timeout;
 
 		timeout = ptlrpc_set_next_timeout(set);
-		lwi = LWI_TIMEOUT(cfs_time_seconds(timeout ? timeout : 1),
-				  ptlrpc_expired_set, set);
 
 		lu_context_enter(&env.le_ctx);
 		lu_context_enter(env.le_ses);
-		l_wait_event(set->set_waitq, ptlrpcd_check(&env, pc), &lwi);
+		if (wait_event_idle_timeout(set->set_waitq,
+					    ptlrpcd_check(&env, pc),
+					    (timeout ? timeout : 1) * HZ) == 0)
+			ptlrpc_expired_set(set);
+
 		lu_context_exit(&env.le_ctx);
 		lu_context_exit(env.le_ses);
 
@@ -562,15 +561,6 @@ int ptlrpcd_start(struct ptlrpcd_ctl *pc)
 		return 0;
 	}
 
-	/*
-	 * So far only "client" ptlrpcd uses an environment. In the future,
-	 * ptlrpcd thread (or a thread-set) has to be given an argument,
-	 * describing its "scope".
-	 */
-	rc = lu_context_init(&pc->pc_env.le_ctx, LCT_CL_THREAD|LCT_REMEMBER);
-	if (rc != 0)
-		goto out;
-
 	task = kthread_run(ptlrpcd, pc, "%s", pc->pc_name);
 	if (IS_ERR(task)) {
 		rc = PTR_ERR(task);
@@ -593,9 +583,6 @@ out_set:
 		spin_unlock(&pc->pc_lock);
 		ptlrpc_set_destroy(set);
 	}
-	lu_context_fini(&pc->pc_env.le_ctx);
-
-out:
 	clear_bit(LIOD_START, &pc->pc_flags);
 	return rc;
 }
@@ -623,7 +610,6 @@ void ptlrpcd_free(struct ptlrpcd_ctl *pc)
 	}
 
 	wait_for_completion(&pc->pc_finishing);
-	lu_context_fini(&pc->pc_env.le_ctx);
 
 	spin_lock(&pc->pc_lock);
 	pc->pc_set = NULL;

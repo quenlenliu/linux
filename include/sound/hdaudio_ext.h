@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __SOUND_HDAUDIO_EXT_H
 #define __SOUND_HDAUDIO_EXT_H
 
@@ -8,11 +9,6 @@
  *
  * @bus: hdac bus
  * @num_streams: streams supported
- * @ppcap: pp capabilities pointer
- * @spbcap: SPIB capabilities pointer
- * @mlcap: MultiLink capabilities pointer
- * @gtscap: gts capabilities pointer
- * @drsmcap: dma resume capabilities pointer
  * @hlink_list: link list of HDA links
  * @lock: lock for link mgmt
  * @cmd_dma_state: state of cmd DMAs: CORB and RIRB
@@ -21,12 +17,6 @@ struct hdac_ext_bus {
 	struct hdac_bus bus;
 	int num_streams;
 	int idx;
-
-	void __iomem *ppcap;
-	void __iomem *spbcap;
-	void __iomem *mlcap;
-	void __iomem *gtscap;
-	void __iomem *drsmcap;
 
 	struct list_head hlink_list;
 
@@ -54,7 +44,6 @@ void snd_hdac_ext_bus_device_remove(struct hdac_ext_bus *ebus);
 #define HDA_CODEC_EXT_ENTRY(_vid, _revid, _name, _drv_data) \
 	HDA_CODEC_REV_EXT_ENTRY(_vid, _revid, _name, _drv_data)
 
-int snd_hdac_ext_bus_parse_capabilities(struct hdac_ext_bus *sbus);
 void snd_hdac_ext_bus_ppcap_enable(struct hdac_ext_bus *chip, bool enable);
 void snd_hdac_ext_bus_ppcap_int_enable(struct hdac_ext_bus *chip, bool enable);
 
@@ -204,7 +193,7 @@ struct hda_dai_map {
  * @pvt_data - private data, for asoc contains asoc codec object
  */
 struct hdac_ext_device {
-	struct hdac_device hdac;
+	struct hdac_device hdev;
 	struct hdac_ext_bus *ebus;
 
 	/* soc-dai to nid map */
@@ -224,7 +213,7 @@ struct hdac_ext_dma_params {
 	u8 stream_tag;
 };
 #define to_ehdac_device(dev) (container_of((dev), \
-				 struct hdac_ext_device, hdac))
+				 struct hdac_ext_device, hdev))
 /*
  * HD-audio codec base driver
  */

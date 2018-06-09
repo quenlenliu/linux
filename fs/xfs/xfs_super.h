@@ -30,7 +30,7 @@ extern void xfs_qm_exit(void);
 
 #ifdef CONFIG_XFS_POSIX_ACL
 # define XFS_ACL_STRING		"ACLs, "
-# define set_posix_acl_flag(sb)	((sb)->s_flags |= MS_POSIXACL)
+# define set_posix_acl_flag(sb)	((sb)->s_flags |= SB_POSIXACL)
 #else
 # define XFS_ACL_STRING
 # define set_posix_acl_flag(sb)	do { } while (0)
@@ -44,6 +44,12 @@ extern void xfs_qm_exit(void);
 # define XFS_REALTIME_STRING
 #endif
 
+#ifdef CONFIG_XFS_ONLINE_SCRUB
+# define XFS_SCRUB_STRING	"scrub, "
+#else
+# define XFS_SCRUB_STRING
+#endif
+
 #ifdef DEBUG
 # define XFS_DBG_STRING		"debug"
 #else
@@ -54,6 +60,7 @@ extern void xfs_qm_exit(void);
 #define XFS_BUILD_OPTIONS	XFS_ACL_STRING \
 				XFS_SECURITY_STRING \
 				XFS_REALTIME_STRING \
+				XFS_SCRUB_STRING \
 				XFS_DBG_STRING /* DBG must be last */
 
 struct xfs_inode;
@@ -61,6 +68,7 @@ struct xfs_mount;
 struct xfs_buftarg;
 struct block_device;
 
+extern void xfs_quiesce_attr(struct xfs_mount *mp);
 extern void xfs_flush_inodes(struct xfs_mount *mp);
 extern void xfs_blkdev_issue_flush(struct xfs_buftarg *);
 extern xfs_agnumber_t xfs_set_inode_alloc(struct xfs_mount *,
@@ -71,6 +79,8 @@ extern const struct xattr_handler *xfs_xattr_handlers[];
 extern const struct quotactl_ops xfs_quotactl_operations;
 
 extern void xfs_reinit_percpu_counters(struct xfs_mount *mp);
+
+extern struct workqueue_struct *xfs_discard_wq;
 
 #define XFS_M(sb)		((struct xfs_mount *)((sb)->s_fs_info))
 

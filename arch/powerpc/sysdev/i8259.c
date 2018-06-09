@@ -68,9 +68,9 @@ unsigned int i8259_irq(void)
 		if (!pci_intack)
 			outb(0x0B, 0x20);	/* ISR register */
 		if(~inb(0x20) & 0x80)
-			irq = NO_IRQ;
+			irq = 0;
 	} else if (irq == 0xff)
-		irq = NO_IRQ;
+		irq = 0;
 
 	if (lock)
 		raw_spin_unlock(&i8259_lock);
@@ -145,21 +145,21 @@ static struct resource pic1_iores = {
 	.name = "8259 (master)",
 	.start = 0x20,
 	.end = 0x21,
-	.flags = IORESOURCE_BUSY,
+	.flags = IORESOURCE_IO | IORESOURCE_BUSY,
 };
 
 static struct resource pic2_iores = {
 	.name = "8259 (slave)",
 	.start = 0xa0,
 	.end = 0xa1,
-	.flags = IORESOURCE_BUSY,
+	.flags = IORESOURCE_IO | IORESOURCE_BUSY,
 };
 
 static struct resource pic_edgectrl_iores = {
 	.name = "8259 edge control",
 	.start = 0x4d0,
 	.end = 0x4d1,
-	.flags = IORESOURCE_BUSY,
+	.flags = IORESOURCE_IO | IORESOURCE_BUSY,
 };
 
 static int i8259_host_match(struct irq_domain *h, struct device_node *node,

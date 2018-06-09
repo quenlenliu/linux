@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPL HEADER START
  *
@@ -31,10 +32,10 @@
  */
 
 #define DEBUG_SUBSYSTEM S_LDLM
-#include "../../include/linux/libcfs/libcfs.h"
+#include <linux/libcfs/libcfs.h>
 
-#include "../include/lustre_dlm.h"
-#include "../include/lustre_lib.h"
+#include <lustre_dlm.h>
+#include <lustre_lib.h>
 
 /**
  * Lock a lock and its resource.
@@ -45,6 +46,8 @@
  * being an atomic operation.
  */
 struct ldlm_resource *lock_res_and_lock(struct ldlm_lock *lock)
+				__acquires(&lock->l_lock)
+				__acquires(&lock->l_resource->lr_lock)
 {
 	spin_lock(&lock->l_lock);
 
@@ -59,6 +62,8 @@ EXPORT_SYMBOL(lock_res_and_lock);
  * Unlock a lock and its resource previously locked with lock_res_and_lock
  */
 void unlock_res_and_lock(struct ldlm_lock *lock)
+		__releases(&lock->l_resource->lr_lock)
+		__releases(&lock->l_lock)
 {
 	/* on server-side resource of lock doesn't change */
 	ldlm_clear_res_locked(lock);
